@@ -1,0 +1,21 @@
+{
+  "name": "fty-club-pro",
+  "version": "2.0.0",
+  "description": "FTY Club - Système complet de gestion e-sport",
+  "main": "fty-club-pro.js",
+  "scripts": {
+    "start": "node fty-club-pro.js"
+  },
+  "keywords": ["esport", "football", "club", "management"],
+  "author": "xywez",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "body-parser": "^1.20.2",
+    "axios": "^1.6.7"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
