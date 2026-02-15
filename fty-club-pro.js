@@ -736,6 +736,146 @@ select.form-control {
 .glow-secondary {
     box-shadow: 0 0 20px var(--secondary-glow);
 }
+
+/* ========== RESPONSIVE MOBILE ========== */
+.mobile-header {
+    display: none;
+}
+
+.mobile-overlay {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    .sidebar {
+        position: fixed;
+        left: -280px;
+        transition: left 0.3s ease;
+        z-index: 1000;
+        height: 100vh;
+    }
+    
+    .sidebar.mobile-open {
+        left: 0;
+    }
+    
+    .main-content {
+        margin-left: 0 !important;
+        padding: 1rem;
+    }
+    
+    .mobile-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.7);
+        z-index: 999;
+        backdrop-filter: blur(4px);
+    }
+    
+    .mobile-overlay.active {
+        display: block;
+    }
+    
+    .mobile-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 1rem;
+        background: var(--bg-card);
+        border-bottom: 1px solid var(--border);
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        backdrop-filter: blur(20px);
+    }
+    
+    .mobile-menu-btn {
+        background: none;
+        border: none;
+        color: var(--text-primary);
+        font-size: 1.5rem;
+        cursor: pointer;
+        padding: 0.5rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    
+    .grid-2,
+    .grid-3,
+    .grid-4 {
+        grid-template-columns: 1fr !important;
+    }
+    
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start !important;
+        gap: 1rem;
+    }
+    
+    .page-title {
+        font-size: 1.5rem !important;
+    }
+    
+    .card {
+        padding: 1.25rem;
+    }
+    
+    .table {
+        font-size: 0.875rem;
+        display: block;
+        overflow-x: auto;
+    }
+    
+    .table th,
+    .table td {
+        padding: 0.75rem 0.5rem;
+    }
+    
+    .hide-mobile {
+        display: none !important;
+    }
+    
+    .btn-group {
+        flex-direction: column;
+        width: 100%;
+    }
+    
+    .btn-group .btn {
+        width: 100%;
+    }
+    
+    input[type="text"],
+    input[type="password"],
+    input[type="email"],
+    input[type="number"],
+    input[type="date"],
+    select,
+    textarea {
+        font-size: 16px;
+    }
+    
+    .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+    }
+    
+    .topbar-actions {
+        width: 100%;
+        justify-content: space-between;
+    }
+}
+
+@media (min-width: 769px) {
+    .mobile-header {
+        display: none !important;
+    }
+}
 `;
 
 // ============ LAYOUT PUBLIC ============
@@ -1558,6 +1698,11 @@ app.post('/candidature', (req, res) => {
 
 // ============ DISCORD OAUTH ============
 app.get('/auth/discord', (req, res) => {
+    // Si c'est pour mot de passe oublié
+    if (req.query.forgot === 'true') {
+        req.session.forgotPassword = true;
+    }
+    
     const params = new URLSearchParams({
         client_id: DISCORD_CLIENT_ID,
         redirect_uri: DISCORD_REDIRECT_URI,
@@ -1609,6 +1754,34 @@ app.get('/auth/discord/callback', async (req, res) => {
         
         if (!user) {
             return res.redirect('/panel/login?error=' + encodeURIComponent('Aucun compte lié à ce Discord. Contacte un admin.'));
+        }
+        
+        // GESTION MOT DE PASSE OUBLIÉ
+        if (req.session.forgotPassword) {
+            // Créer une demande de reset
+            if (!db.passwordResets) db.passwordResets = [];
+            
+            const resetRequest = {
+                id: 'reset-' + Date.now(),
+                userId: user.id,
+                username: user.username,
+                requestedBy: user.username,
+                requestedAt: new Date().toISOString(),
+                discordId: discordUser.id,
+                status: 'pending',
+                approvedBy: null,
+                approvedAt: null,
+                completed: false
+            };
+            
+            db.passwordResets.push(resetRequest);
+            writeDB(db);
+            
+            delete req.session.forgotPassword;
+            
+            addLog('Demande reset MDP (Discord)', user.username, user.username, { via: 'Discord OAuth' }, getClientIP(req));
+            
+            return res.redirect('/panel/forgot-password?success=' + encodeURIComponent('Demande envoyée ! Un administrateur la traitera sous peu. Vous serez contacté sur Discord.'));
         }
         
         // Update Discord info
@@ -1852,7 +2025,28 @@ app.post('/panel/login', (req, res) => {
     const db = readDB();
     const user = db.users.find(u => u.username === username);
     
+    // Si l'utilisateur n'existe pas ou mot de passe incorrect
     if (!user || !comparePassword(password, user.password)) {
+        // Incrémenter les tentatives échouées
+        if (user) {
+            if (!user.loginAttempts) user.loginAttempts = 0;
+            user.loginAttempts++;
+            
+            // Suspension automatique après 3 tentatives
+            if (user.loginAttempts >= 3) {
+                user.suspended = true;
+                user.suspensionReason = 'Suspension automatique : 3 tentatives de connexion échouées';
+                user.suspendedAt = new Date().toISOString();
+                writeDB(db);
+                addLog('Suspension auto', 'SYSTÈME', user.username, { reason: '3 tentatives échouées' }, getClientIP(req));
+                return res.redirect('/panel/login?error=' + encodeURIComponent('Compte suspendu après 3 tentatives échouées. Contactez un administrateur.'));
+            }
+            
+            writeDB(db);
+            const remainingAttempts = 3 - user.loginAttempts;
+            return res.redirect('/panel/login?error=' + encodeURIComponent(`Identifiants incorrects (${remainingAttempts} tentative${remainingAttempts > 1 ? 's' : ''} restante${remainingAttempts > 1 ? 's' : ''})`));
+        }
+        
         return res.redirect('/panel/login?error=' + encodeURIComponent('Identifiants incorrects'));
     }
     
@@ -1861,8 +2055,12 @@ app.post('/panel/login', (req, res) => {
     }
     
     if (user.suspended) {
-        return res.redirect('/panel/login?error=' + encodeURIComponent('Compte suspendu'));
+        const reason = user.suspensionReason ? ` - Raison: ${user.suspensionReason}` : '';
+        return res.redirect('/panel/login?error=' + encodeURIComponent(`Compte suspendu${reason}. Contactez un administrateur.`));
     }
+    
+    // Connexion réussie : réinitialiser les tentatives
+    user.loginAttempts = 0;
     
     const clientIP = getClientIP(req);
     user.lastLogin = new Date().toISOString();
@@ -2240,6 +2438,22 @@ function panelLayout(user, title, content, active = '') {
     </style>
 </head>
 <body>
+    <!-- Header Mobile -->
+    <div class="mobile-header">
+        <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Menu">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="3" y1="12" x2="21" y2="12"/>
+                <line x1="3" y1="6" x2="21" y2="6"/>
+                <line x1="3" y1="18" x2="21" y2="18"/>
+            </svg>
+        </button>
+        <div style="font-weight: 900; font-family: var(--font-display); font-size: 1.25rem;">⚽ FTY PANEL</div>
+        <div style="width: 40px;"></div>
+    </div>
+
+    <!-- Overlay Mobile -->
+    <div id="mobile-overlay" class="mobile-overlay"></div>
+
     <div class="panel-wrapper">
         <aside class="sidebar">
             <div class="sidebar-brand">
@@ -2288,6 +2502,14 @@ function panelLayout(user, title, content, active = '') {
                     <a href="/panel/logs" class="sidebar-link ${active === 'logs' ? 'active' : ''}">
                         <span class="sidebar-icon">📋</span>
                         <span>Logs</span>
+                    </a>
+                </li>
+                ` : ''}
+                ${HIERARCHY[user.accountType] >= HIERARCHY['manager'] ? `
+                <li class="sidebar-item">
+                    <a href="/panel/password-resets" class="sidebar-link ${active === 'security' ? 'active' : ''}">
+                        <span class="sidebar-icon">🔐</span>
+                        <span>Reset MDP</span>
                     </a>
                 </li>
                 ` : ''}
@@ -2361,6 +2583,38 @@ function panelLayout(user, title, content, active = '') {
         }
 
         updateThemeIcon('${theme}');
+    </script>
+    
+    <script>
+    // Mobile menu toggle
+    document.addEventListener('DOMContentLoaded', function() {
+        const sidebar = document.querySelector('.sidebar');
+        const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+        const mobileOverlay = document.getElementById('mobile-overlay');
+        
+        if (mobileMenuBtn && sidebar && mobileOverlay) {
+            mobileMenuBtn.addEventListener('click', function() {
+                sidebar.classList.toggle('mobile-open');
+                mobileOverlay.classList.toggle('active');
+            });
+            
+            mobileOverlay.addEventListener('click', function() {
+                sidebar.classList.remove('mobile-open');
+                mobileOverlay.classList.remove('active');
+            });
+            
+            // Fermer le menu sur les liens
+            const sidebarLinks = sidebar.querySelectorAll('.sidebar-link');
+            sidebarLinks.forEach(link => {
+                link.addEventListener('click', function() {
+                    if (window.innerWidth <= 768) {
+                        sidebar.classList.remove('mobile-open');
+                        mobileOverlay.classList.remove('active');
+                    }
+                });
+            });
+        }
+    });
     </script>
 </body>
 </html>`;
@@ -2601,10 +2855,15 @@ app.get('/panel/users/create', isAuthenticated, hasRole('manager'), (req, res) =
                     <label class="form-label">Rôle *</label>
                     <select name="accountType" class="form-control" required>
                         <option value="">-- Sélectionner --</option>
-                        ${Object.keys(HIERARCHY).filter(role => HIERARCHY[role] < HIERARCHY[user.accountType]).map(role => `
+                        ${Object.keys(HIERARCHY).filter(role => {
+                            // Seul xywez peut créer des owners
+                            if (role === 'owner' && user.username !== 'xywez') return false;
+                            return HIERARCHY[role] < HIERARCHY[user.accountType];
+                        }).map(role => `
                             <option value="${role}">${ROLE_LABELS[role]}</option>
                         `).join('')}
                     </select>
+                    ${user.username !== 'xywez' && user.accountType === 'owner' ? '<small class="text-muted">Seul xywez peut créer des comptes Owner</small>' : ''}
                 </div>
                 
                 <div class="form-group">
@@ -2651,6 +2910,11 @@ app.post('/panel/users/create', isAuthenticated, hasRole('manager'), (req, res) 
     
     if (discordId && db.users.find(u => u.discordId === discordId)) {
         return res.redirect('/panel/users/create?error=' + encodeURIComponent('Ce Discord ID est déjà lié à un compte'));
+    }
+    
+    // Vérifier que seul xywez peut créer des owners
+    if (accountType === 'owner' && req.session.user.username !== 'xywez') {
+        return res.redirect('/panel/users/create?error=' + encodeURIComponent('Seul xywez peut créer des comptes Owner'));
     }
     
     // Vérifier que l'utilisateur ne peut pas créer un rôle supérieur au sien
@@ -2729,14 +2993,18 @@ app.get('/panel/users/:userId/edit', isAuthenticated, hasRole('manager'), (req, 
                 
                 <div class="form-group">
                     <label>Rôle</label>
-                    <select name="accountType" class="form-control" ${user.accountType !== 'owner' ? 'disabled' : ''}>
-                        ${Object.keys(ROLE_LABELS).map(role => `
+                    <select name="accountType" class="form-control" ${user.accountType !== 'owner' || (user.accountType === 'owner' && user.username !== 'xywez') ? 'disabled' : ''}>
+                        ${Object.keys(ROLE_LABELS).filter(role => {
+                            // Seul xywez peut modifier vers owner
+                            if (role === 'owner' && user.username !== 'xywez') return false;
+                            return true;
+                        }).map(role => `
                             <option value="${role}" ${targetUser.accountType === role ? 'selected' : ''}>
                                 ${ROLE_LABELS[role]}
                             </option>
                         `).join('')}
                     </select>
-                    ${user.accountType !== 'owner' ? '<small class="text-muted">Seul le owner peut modifier les rôles</small>' : ''}
+                    ${user.accountType !== 'owner' ? '<small class="text-muted">Seul le owner peut modifier les rôles</small>' : user.username !== 'xywez' ? '<small class="text-muted">Seul xywez peut créer/modifier des comptes Owner</small>' : ''}
                 </div>
                 
                 <div class="form-group">
@@ -2746,14 +3014,36 @@ app.get('/panel/users/:userId/edit', isAuthenticated, hasRole('manager'), (req, 
                 
                 <div class="form-group">
                     <label>Statut</label>
-                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem;">
+                    <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.5rem;">
+                        ${!targetUser.suspended ? `
                         <label style="display: flex; align-items: center; gap: 0.5rem;">
-                            <input type="checkbox" name="suspended" ${targetUser.suspended ? 'checked' : ''}>
-                            <span>Suspendu</span>
+                            <input type="checkbox" name="suspended">
+                            <span>Suspendre manuellement</span>
                         </label>
+                        ` : `
+                        <div style="background: #ff9800; color: white; padding: 1rem; border-radius: 8px;">
+                            <div style="font-weight: 600; margin-bottom: 0.5rem;">⚠️ Compte Suspendu</div>
+                            <div style="font-size: 0.9rem;">
+                                <div><strong>Raison:</strong> ${targetUser.suspensionReason || 'Non spécifiée'}</div>
+                                <div><strong>Date:</strong> ${targetUser.suspendedAt ? new Date(targetUser.suspendedAt).toLocaleString('fr') : 'Inconnue'}</div>
+                                ${targetUser.loginAttempts ? `<div><strong>Tentatives échouées:</strong> ${targetUser.loginAttempts}</div>` : ''}
+                            </div>
+                            
+                            ${HIERARCHY[user.accountType] > HIERARCHY[targetUser.accountType] || user.username === 'xywez' ? `
+                            <form method="POST" action="/panel/users/${targetUserId}/unsuspend" style="margin-top: 1rem;" onsubmit="return confirm('Lever la suspension de ${targetUser.username} ?')">
+                                <button type="submit" class="btn btn-success btn-sm" style="width: 100%;">✅ Lever la Suspension</button>
+                            </form>
+                            ` : `
+                            <div style="margin-top: 1rem; font-size: 0.9rem; opacity: 0.8;">
+                                ℹ️ Vous ne pouvez pas lever cette suspension (rang insuffisant)
+                            </div>
+                            `}
+                        </div>
+                        `}
+                        
                         <label style="display: flex; align-items: center; gap: 0.5rem;">
                             <input type="checkbox" name="banned" ${targetUser.banned ? 'checked' : ''}>
-                            <span>Banni</span>
+                            <span>Banni définitivement</span>
                         </label>
                     </div>
                 </div>
@@ -2919,6 +3209,149 @@ app.post('/panel/users/:userId/delete', isAuthenticated, hasRole('owner'), (req,
     
     res.redirect('/panel/users?success=' + encodeURIComponent(`Utilisateur ${targetUser.username} supprimé`));
 });
+// ============ UNSUSPEND USER (AVEC HIÉRARCHIE) ============
+app.post('/panel/users/:userId/unsuspend', isAuthenticated, hasRole('manager'), (req, res) => {
+    const db = readDB();
+    const user = req.session.user;
+    const targetUserId = req.params.userId;
+    
+    const targetUserIndex = db.users.findIndex(u => u.id === targetUserId);
+    
+    if (targetUserIndex === -1) {
+        return res.redirect('/panel/users?error=' + encodeURIComponent('Utilisateur introuvable'));
+    }
+    
+    const targetUser = db.users[targetUserIndex];
+    
+    if (HIERARCHY[user.accountType] <= HIERARCHY[targetUser.accountType] && user.username !== 'xywez') {
+        return res.redirect(`/panel/users/${targetUserId}/edit?error=` + encodeURIComponent('Vous ne pouvez pas lever la suspension d\'un utilisateur de rang égal ou supérieur'));
+    }
+    
+    targetUser.suspended = false;
+    targetUser.suspensionReason = null;
+    targetUser.suspendedAt = null;
+    targetUser.loginAttempts = 0;
+    
+    db.users[targetUserIndex] = targetUser;
+    writeDB(db);
+    
+    const clientIP = getClientIP(req);
+    addLog('Levée de suspension', user.username, targetUser.username, {}, clientIP);
+    
+    res.redirect(`/panel/users/${targetUserId}/edit?success=` + encodeURIComponent('Suspension levée avec succès'));
+});
+
+// ============ PAGE MOT DE PASSE OUBLIÉ (PUBLIQUE) ============
+app.get('/panel/forgot-password', (req, res) => {
+    const html = `<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mot de passe oublié - FTY Club</title>
+    <style>${GLOBAL_CSS}</style>
+</head>
+<body>
+    <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; background: radial-gradient(circle at 30% 50%, var(--primary-glow) 0%, transparent 50%), radial-gradient(circle at 70% 50%, var(--secondary-glow) 0%, transparent 50%);">
+        <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 3rem; max-width: 500px; width: 100%; backdrop-filter: blur(20px); box-shadow: var(--shadow-xl);">
+            <div style="text-align: center; margin-bottom: 2rem;">
+                <div style="width: 80px; height: 80px; margin: 0 auto 1.5rem; background: linear-gradient(135deg, var(--secondary) 0%, var(--primary) 100%); border-radius: 20px; display: flex; align-items: center; justify-content: center; font-size: 2.5rem;">🔒</div>
+                <h1 style="font-size: 2rem; font-weight: 900; margin-bottom: 0.5rem; font-family: var(--font-display);">Mot de passe oublié ?</h1>
+                <p style="color: var(--text-secondary);">Connectez-vous avec Discord pour demander une réinitialisation</p>
+            </div>
+            
+            ${req.query.error ? `<div class="alert alert-danger">${decodeURIComponent(req.query.error)}</div>` : ''}
+            ${req.query.success ? `<div class="alert alert-success">${decodeURIComponent(req.query.success)}</div>` : ''}
+            
+            <div style="text-align: center;">
+                <a href="/auth/discord?forgot=true" class="btn btn-primary btn-full btn-lg" style="display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515a.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0a12.64 12.64 0 0 0-.617-1.25a.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057a19.9 19.9 0 0 0 5.993 3.03a.078.078 0 0 0 .084-.028a14.09 14.09 0 0 0 1.226-1.994a.076.076 0 0 0-.041-.106a13.107 13.107 0 0 1-1.872-.892a.077.077 0 0 1-.008-.128a10.2 10.2 0 0 0 .372-.292a.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127a12.299 12.299 0 0 1-1.873.892a.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028a19.839 19.839 0 0 0 6.002-3.03a.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419c0-1.333.956-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42c0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419c0-1.333.955-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42c0 1.333-.946 2.418-2.157 2.418z"/></svg>
+                    Se connecter avec Discord
+                </a>
+                
+                <div style="margin-top: 2rem; padding-top: 2rem; border-top: 1px solid var(--border);">
+                    <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem;">
+                        Après connexion Discord, une demande de réinitialisation sera créée et soumise à validation.
+                    </p>
+                    <a href="/panel/login" style="color: var(--primary); text-decoration: none; font-weight: 600;">← Retour à la connexion</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>`;
+    res.send(html);
+});
+
+// ============ GESTION DES DEMANDES DE RESET MDP ============
+app.get('/panel/password-resets', isAuthenticated, hasRole('manager'), (req, res) => {
+    const db = readDB();
+    const user = req.session.user;
+    
+    if (!db.passwordResets) db.passwordResets = [];
+    
+    const pendingResets = db.passwordResets.filter(reset => {
+        if (reset.completed) return false;
+        const targetUser = db.users.find(u => u.id === reset.userId);
+        if (!targetUser) return false;
+        if (user.username === 'xywez') return true;
+        return HIERARCHY[targetUser.accountType] < HIERARCHY[user.accountType];
+    });
+    
+    const content = `
+    <div class="page-header">
+        <div>
+            <div class="page-title">Demandes de <span>Reset MDP</span></div>
+            <div class="page-breadcrumb">Panel · Sécurité · Réinitialisation</div>
+        </div>
+    </div>
+    
+    ${req.query.success ? `<div class="alert alert-success">✅ ${decodeURIComponent(req.query.success)}</div>` : ''}
+    ${req.query.error ? `<div class="alert alert-danger">❌ ${decodeURIComponent(req.query.error)}</div>` : ''}
+    
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">📋 Demandes en Attente (${pendingResets.length})</h2>
+        </div>
+        
+        ${pendingResets.length === 0 ? `
+            <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
+                <div style="font-size: 3rem; margin-bottom: 1rem;">✅</div>
+                <p>Aucune demande en attente</p>
+            </div>
+        ` : `
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Utilisateur</th>
+                        <th class="hide-mobile">Demandé par</th>
+                        <th class="hide-mobile">Date</th>
+                        <th>Statut</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${pendingResets.map(reset => {
+                        const targetUser = db.users.find(u => u.id === reset.userId);
+                        if (!targetUser) return '';
+                        return `
+                        <tr>
+                            <td><strong>${reset.username}</strong><br><span class="badge" style="background: ${ROLE_COLORS[targetUser.accountType]}20; color: ${ROLE_COLORS[targetUser.accountType]}">${ROLE_LABELS[targetUser.accountType]}</span></td>
+                            <td class="hide-mobile">${reset.requestedBy}</td>
+                            <td class="hide-mobile" style="font-size: 0.875rem; color: var(--text-muted);">${new Date(reset.requestedAt).toLocaleString('fr')}</td>
+                            <td><span class="badge" style="background: #ff9800; color: white;">En attente</span></td>
+                            <td><a href="/panel/users/${reset.userId}/edit" class="btn btn-sm btn-primary">Traiter</a></td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+        `}
+    </div>
+    `;
+    
+    res.send(panelLayout(user, 'Demandes Reset MDP', content, 'security'));
+});
+
 
 app.get('/panel/candidatures', isAuthenticated, hasRole('manager'), (req, res) => {
     const db = readDB();
