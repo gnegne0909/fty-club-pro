@@ -1,0 +1,18 @@
+{
+  "name": "fty-club-pro-panel",
+  "version": "3.0.0",
+  "description": "Panel web FTY Club Pro - Enhanced",
+  "main": "server-ENHANCED.js",
+  "scripts": {
+    "start": "node server-ENHANCED.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "body-parser": "^1.20.2",
+    "axios": "^1.6.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
