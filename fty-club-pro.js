@@ -1707,64 +1707,116 @@ app.get('/auth/discord', (req, res) => {
 });
 
 app.get('/auth/discord/callback', async (req, res) => {
-    const { code, state } = req.query;
-    const action = req.query.action || state;
+    const code = req.query.code;
+    const action = req.query.state || 'login';
     
     if (!code) {
-        return res.redirect('/panel/login?error=' + encodeURIComponent('Code Discord manquant'));
+        return res.redirect('/panel/login?error=' + encodeURIComponent('Code OAuth manquant'));
     }
     
     try {
+        // Exchange code for token
         const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', 
             new URLSearchParams({
                 client_id: DISCORD_CLIENT_ID,
                 client_secret: DISCORD_CLIENT_SECRET,
-                code,
+                code: code,
                 grant_type: 'authorization_code',
                 redirect_uri: DISCORD_REDIRECT_URI
             }),
-            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+            {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            }
         );
         
         const { access_token } = tokenResponse.data;
+        
+        // Get user info
         const userResponse = await axios.get('https://discord.com/api/users/@me', {
-            headers: { Authorization: `Bearer ${access_token}` }
+            headers: {
+                Authorization: `Bearer ${access_token}`
+            }
         });
         
         const discordUser = userResponse.data;
-        req.session.discordUser = {
-            id: discordUser.id,
-            username: discordUser.username,
-            discriminator: discordUser.discriminator,
-            avatar: discordUser.avatar
+        const db = readDB();
+        
+        // Find user by Discord ID
+        let user = db.users.find(u => u.discordId === discordUser.id);
+        
+        if (!user) {
+            return res.redirect('/panel/login?error=' + encodeURIComponent('Aucun compte lié à ce Discord. Contacte un admin.'));
+        }
+        
+        
+        
+        // Si c'est forgot-username
+        if (action === 'forgot-username') {
+            if (user) {
+                return res.redirect('/panel/forgot-username?success=1&username=' + encodeURIComponent(user.username));
+            } else {
+                return res.redirect('/panel/forgot-username?error=' + encodeURIComponent('Aucun compte lié à ce Discord'));
+            }
+        }
+        
+        // Si c'est reset-password
+        if (action === 'reset-password') {
+            if (!user) {
+                return res.redirect('/panel/forgot-password?error=' + encodeURIComponent('Aucun compte lié à ce Discord'));
+            }
+            
+            // Créer une demande de reset
+            if (!db.resetRequests) db.resetRequests = [];
+            
+            const existingRequest = db.resetRequests.find(r => r.username === user.username && r.status === 'pending');
+            if (existingRequest) {
+                return res.redirect('/panel/forgot-password?error=' + encodeURIComponent('Une demande est déjà en cours'));
+            }
+            
+            db.resetRequests.push({
+                id: Date.now().toString(),
+                username: user.username,
+                accountType: user.accountType,
+                discordId: discordUser.id,
+                discordUsername: discordUser.username,
+                reason: 'Demande via Discord OAuth',
+                requestDate: new Date().toISOString(),
+                status: 'pending',
+                treatedBy: null,
+                treatedDate: null,
+                newPassword: null
+            });
+            
+            writeDB(db);
+            addLog('Demande reset via Discord', user.username, user.accountType, {}, getClientIP(req));
+            
+            return res.redirect('/panel/forgot-password?success=1');
+        }
+// Update Discord info
+        user.discordUsername = `${discordUser.username}#${discordUser.discriminator}`;
+        user.discordAvatar = discordUser.avatar;
+        user.lastLogin = new Date().toISOString();
+        
+        const clientIP = getClientIP(req);
+        if (!user.ip.includes(clientIP)) user.ip.push(clientIP);
+        
+        writeDB(db);
+        addLog('Connexion Discord OAuth', user.username, user.accountType, { discordId: discordUser.id }, clientIP);
+        
+        // Create session
+        req.session.user = {
+            username: user.username,
+            accountType: user.accountType,
+            theme: user.theme || 'dark'
         };
         
-        // Actions spéciales
-        if (action === 'username') {
-            return res.redirect('/username-recovery-result');
-        } else if (action === 'reset') {
-            return res.redirect('/password-reset-request');
-        }
+        res.redirect('/panel/dashboard');
         
-        // Connexion normale
-        const db = readDB();
-        const user = db.users.find(u => u.discordId === discordUser.id);
-        
-        if (user) {
-            req.session.user = user;
-            user.lastLogin = new Date().toISOString();
-            const ip = getClientIP(req);
-            if (!user.ip) user.ip = [];
-            if (!user.ip.includes(ip)) user.ip.push(ip);
-            writeDB(db);
-            addLog('Connexion Discord', user.username, 'OAuth', {}, ip);
-            return res.redirect('/panel');
-        } else {
-            return res.redirect('/panel/login?error=' + encodeURIComponent('Aucun compte lié'));
-        }
     } catch (error) {
-        console.error('Erreur OAuth:', error);
-        return res.redirect('/panel/login?error=' + encodeURIComponent('Erreur Discord'));
+        console.error('Discord OAuth Error:', error);
+        res.redirect('/panel/login?error=' + encodeURIComponent('Erreur OAuth Discord'));
     }
 });
 
@@ -4455,10 +4507,217 @@ app.post('/panel/capitaine/joueurs/toggle-suspension', isAuthenticated, hasRole(
 
 
 
+
+// ============================================================
+// 🔥 SYSTÈME COMPLET FTY CLUB PRO - TOUTES FONCTIONNALITÉS
+// ============================================================
+
+// ========== CALLBACK DISCORD MULTI-ACTIONS ==========
+// Correction : Vérifier si le routeur est initialisé avant d'accéder au stack
+if (app._router && app._router.stack) {
+    const originalCallbackIndex = app._router.stack.findIndex(
+        layer => layer.route && layer.route.path === '/auth/discord/callback'
+    );
+
+    if (originalCallbackIndex !== -1) {
+        app._router.stack.splice(originalCallbackIndex, 1);
+    }
+}
+
+// COMMENTÉ : Route callback dupliquée - La route originale à la ligne 1709 sera utilisée
+/*
+// COMMENTÉ : Route callback dupliquée - La route originale à la ligne 1709 sera utilisée
+/*
+app.get('/auth/discord/callback', async (req, res) => {
+    const { code } = req.query;
+    const action = req.query.action || req.query.state;
+    
+    if (!code) {
+        return res.redirect('/panel/login?error=Code manquant');
+    }
+    
+    try {
+        const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', 
+            new URLSearchParams({
+                client_id: DISCORD_CLIENT_ID,
+                client_secret: DISCORD_CLIENT_SECRET,
+                code,
+                grant_type: 'authorization_code',
+                redirect_uri: DISCORD_REDIRECT_URI
+            }),
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
+        
+        const { access_token } = tokenResponse.data;
+        const userResponse = await axios.get('https://discord.com/api/users/@me', {
+            headers: { Authorization: `Bearer ${access_token}` }
+        });
+        
+        const discordUser = userResponse.data;
+        req.session.discordUser = {
+            id: discordUser.id,
+            username: discordUser.username,
+            discriminator: discordUser.discriminator,
+            avatar: discordUser.avatar
+        };
+        
+        if (action === 'username') return res.redirect('/username-recovery-result');
+        if (action === 'reset') return res.redirect('/password-reset-request');
+        
+        const db = readDB();
+        const user = db.users.find(u => u.discordId === discordUser.id);
+        
+        if (user) {
+            req.session.user = user;
+            user.lastLogin = new Date().toISOString();
+            const ip = getClientIP(req);
+            if (!user.ip) user.ip = [];
+            if (!user.ip.includes(ip)) user.ip.push(ip);
+            writeDB(db);
+            addLog('Connexion Discord', user.username, 'OAuth', {}, ip);
+            return res.redirect('/panel');
+        } else {
+            return res.redirect('/panel/login?error=Compte non lié');
+        }
+    } catch (error) {
+        console.error('OAuth Error:', error);
+        return res.redirect('/panel/login?error=Erreur Discord');
+    }
+});
+*/
+
+
 // ========== IDENTIFIANT OUBLIÉ ==========
 
 app.get('/forgot-username', (req, res) => {
-    res.send(forgotUsernameHTML());
+    res.send(`<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Identifiant oublié - FTY Club</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            padding: 60px;
+            max-width: 520px;
+            width: 100%;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.3);
+            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(40px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .icon { 
+            font-size: 80px; 
+            text-align: center; 
+            margin-bottom: 24px;
+            animation: bounce 2s ease-in-out infinite;
+        }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        h1 { 
+            text-align: center; 
+            background: linear-gradient(135deg, #6366f1, #d946ef);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 32px; 
+            margin-bottom: 12px;
+            font-weight: 800;
+        }
+        .subtitle { 
+            text-align: center; 
+            color: #64748b; 
+            margin-bottom: 40px;
+            font-size: 16px;
+            line-height: 1.6;
+        }
+        .info { 
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0e7ff 100%);
+            border-left: 4px solid #6366f1; 
+            padding: 24px; 
+            margin-bottom: 32px; 
+            border-radius: 16px;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.1);
+        }
+        .info h3 { 
+            color: #6366f1; 
+            font-size: 18px; 
+            margin-bottom: 12px;
+            font-weight: 700;
+        }
+        .info p { 
+            color: #475569; 
+            line-height: 1.8;
+        }
+        .btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 16px;
+            text-decoration: none;
+            font-weight: 700;
+            font-size: 17px;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
+        }
+        .btn:hover { 
+            transform: translateY(-3px);
+            box-shadow: 0 20px 50px rgba(99, 102, 241, 0.4);
+        }
+        .btn:active {
+            transform: translateY(-1px);
+        }
+        .back { 
+            display: block; 
+            text-align: center; 
+            margin-top: 24px; 
+            color: #6366f1; 
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .back:hover { 
+            color: #d946ef;
+            transform: translateX(-5px);
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔍</div>
+        <h1>Identifiant oublié ?</h1>
+        <p class="subtitle">Récupérez instantanément votre identifiant via Discord</p>
+        <div class="info">
+            <h3>⚡ Récupération instantanée</h3>
+            <p>Votre identifiant s'affichera immédiatement. Vous ne serez pas connecté automatiquement.</p>
+        </div>
+        <a href="/auth/discord?action=username" class="btn">
+            🎮 Récupérer mon identifiant
+        </a>
+        <a href="/panel/login" class="back">← Retour à la connexion</a>
+    </div>
+</body>
+</html>`);
 });
 
 app.get('/username-recovery-result', (req, res) => {
@@ -4467,81 +4726,10 @@ app.get('/username-recovery-result', (req, res) => {
     const db = readDB();
     const user = db.users.find(u => u.discordId === req.session.discordUser.id);
     const discord = req.session.discordUser.username + '#' + req.session.discordUser.discriminator;
-    delete req.session.discordUser; // NE PAS CONNECTER
+    delete req.session.discordUser;
     
     if (!user) {
-        return res.send(usernameNotFoundHTML(discord));
-    }
-    
-    res.send(usernameRecoverySuccessHTML(user.username, discord));
-});
-
-function forgotUsernameHTML() {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Identifiant oublié - FTY Club</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card {
-            background: white;
-            border-radius: 20px;
-            padding: 50px;
-            max-width: 500px;
-            width: 100%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-        }
-        .icon { font-size: 64px; text-align: center; margin-bottom: 20px; }
-        h1 { text-align: center; color: #333; font-size: 28px; margin-bottom: 10px; }
-        .subtitle { text-align: center; color: #666; margin-bottom: 40px; }
-        .info { background: #f0f7ff; border-left: 4px solid #667eea; padding: 20px; margin-bottom: 30px; border-radius: 8px; }
-        .info h3 { color: #667eea; font-size: 16px; margin-bottom: 10px; }
-        .info p { color: #555; }
-        .btn {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            background: #5865F2;
-            color: white;
-            padding: 18px;
-            border-radius: 12px;
-            text-decoration: none;
-            font-weight: 600;
-            transition: all 0.3s;
-        }
-        .btn:hover { background: #4752C4; transform: translateY(-2px); }
-        .back { display: block; text-align: center; margin-top: 20px; color: #667eea; text-decoration: none; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">🔍</div>
-        <h1>Identifiant oublié ?</h1>
-        <p class="subtitle">Récupérez votre identifiant via Discord</p>
-        <div class="info">
-            <h3>⚡ Récupération instantanée</h3>
-            <p>Votre identifiant s'affichera immédiatement. Vous ne serez pas connecté.</p>
-        </div>
-        <a href="/auth/discord?action=username" class="btn">Récupérer mon identifiant</a>
-        <a href="/panel/login" class="back">← Retour</a>
-    </div>
-</body>
-</html>`;
-}
-
-function usernameNotFoundHTML(discord) {
-    return `<!DOCTYPE html>
+        return res.send(`<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
@@ -4549,8 +4737,8 @@ function usernameNotFoundHTML(discord) {
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -4559,18 +4747,42 @@ function usernameNotFoundHTML(discord) {
         }
         .card {
             background: white;
-            border-radius: 20px;
-            padding: 50px;
-            max-width: 500px;
+            border-radius: 24px;
+            padding: 60px;
+            max-width: 520px;
             width: 100%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.3);
             text-align: center;
+            animation: slideUp 0.6s ease;
         }
-        .icon { font-size: 64px; margin-bottom: 20px; }
-        h1 { color: #e74c3c; font-size: 24px; margin-bottom: 15px; }
-        p { color: #666; margin-bottom: 20px; }
-        .tag { background: #f8f9fa; padding: 15px; border-radius: 10px; margin: 20px 0; font-weight: 600; color: #5865F2; }
-        .btn { display: inline-block; background: #667eea; color: white; padding: 15px 30px; border-radius: 10px; text-decoration: none; font-weight: 600; }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .icon { font-size: 80px; margin-bottom: 24px; }
+        h1 { color: #ef4444; font-size: 28px; margin-bottom: 16px; font-weight: 800; }
+        p { color: #64748b; margin-bottom: 20px; line-height: 1.8; }
+        .tag { 
+            background: #f1f5f9; 
+            padding: 16px; 
+            border-radius: 12px; 
+            margin: 24px 0; 
+            font-weight: 700; 
+            color: #5865F2;
+            font-size: 18px;
+        }
+        .btn { 
+            display: inline-block; 
+            background: linear-gradient(135deg, #6366f1, #d946ef);
+            color: white; 
+            padding: 16px 36px; 
+            border-radius: 12px; 
+            text-decoration: none; 
+            font-weight: 700;
+            transition: all 0.3s;
+            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
+        }
+        .btn:hover { transform: translateY(-2px); }
     </style>
 </head>
 <body>
@@ -4579,24 +4791,23 @@ function usernameNotFoundHTML(discord) {
         <h1>Aucun compte trouvé</h1>
         <p>Aucun compte FTY lié à :</p>
         <div class="tag">${discord}</div>
-        <p>Contactez un admin.</p>
-        <a href="/panel/login" class="btn">Retour</a>
+        <p>Contactez un administrateur pour lier votre Discord.</p>
+        <a href="/panel/login" class="btn">Retour à la connexion</a>
     </div>
 </body>
-</html>`;
-}
-
-function usernameRecoverySuccessHTML(username, discord) {
-    return `<!DOCTYPE html>
+</html>`);
+    }
+    
+    res.send(`<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <title>Identifiant récupéré</title>
+    <title>Identifiant récupéré !</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -4605,44 +4816,84 @@ function usernameRecoverySuccessHTML(username, discord) {
         }
         .card {
             background: white;
-            border-radius: 20px;
-            padding: 50px;
-            max-width: 600px;
+            border-radius: 24px;
+            padding: 60px;
+            max-width: 640px;
             width: 100%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.3);
+            animation: slideUp 0.6s ease;
         }
-        .icon { font-size: 64px; text-align: center; margin-bottom: 20px; }
-        h1 { text-align: center; color: #333; font-size: 28px; margin-bottom: 30px; }
-        .username-box {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 15px;
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .icon { 
+            font-size: 80px; 
+            text-align: center; 
+            margin-bottom: 24px;
+            animation: success 0.8s ease;
+        }
+        @keyframes success {
+            0% { opacity: 0; transform: scale(0); }
+            50% { transform: scale(1.2); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+        h1 { 
             text-align: center;
-            margin: 30px 0;
+            background: linear-gradient(135deg, #10b981, #6366f1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 32px; 
+            margin-bottom: 32px;
+            font-weight: 800;
         }
-        .username-label { font-size: 14px; opacity: 0.9; margin-bottom: 10px; }
-        .username-value { font-size: 32px; font-weight: 700; }
+        .username-box {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            color: white;
+            padding: 40px;
+            border-radius: 20px;
+            text-align: center;
+            margin: 32px 0;
+            box-shadow: 0 20px 50px rgba(99, 102, 241, 0.4);
+            animation: glow 2s ease-in-out infinite;
+        }
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 20px 50px rgba(99, 102, 241, 0.4); }
+            50% { box-shadow: 0 20px 60px rgba(217, 70, 239, 0.6); }
+        }
+        .username-label { font-size: 14px; opacity: 0.9; margin-bottom: 12px; letter-spacing: 2px; }
+        .username-value { 
+            font-size: 42px; 
+            font-weight: 900; 
+            letter-spacing: 1px;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
         .warning {
-            background: #fff3cd;
-            border-left: 4px solid #ffc107;
-            padding: 20px;
-            margin: 20px 0;
-            border-radius: 8px;
-            color: #856404;
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border-left: 4px solid #f59e0b;
+            padding: 24px;
+            margin: 24px 0;
+            border-radius: 16px;
+            color: #92400e;
+            line-height: 1.8;
         }
         .btn {
             display: block;
-            background: #667eea;
+            background: linear-gradient(135deg, #6366f1, #d946ef);
             color: white;
-            padding: 18px;
-            border-radius: 12px;
+            padding: 20px;
+            border-radius: 16px;
             text-decoration: none;
-            font-weight: 600;
+            font-weight: 700;
+            font-size: 18px;
             text-align: center;
             transition: all 0.3s;
+            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
         }
-        .btn:hover { background: #5568d3; }
+        .btn:hover { 
+            transform: translateY(-3px); 
+            box-shadow: 0 20px 50px rgba(99, 102, 241, 0.5);
+        }
     </style>
 </head>
 <body>
@@ -4651,23 +4902,109 @@ function usernameRecoverySuccessHTML(username, discord) {
         <h1>Identifiant récupéré !</h1>
         <div class="username-box">
             <div class="username-label">VOTRE IDENTIFIANT FTY</div>
-            <div class="username-value">${username}</div>
+            <div class="username-value">${user.username}</div>
         </div>
         <div class="warning">
-            <p>💡 <strong>Notez-le bien !</strong> Utilisez cet identifiant avec votre mot de passe.</p>
+            <p>💡 <strong>Notez-le bien !</strong> Utilisez cet identifiant avec votre mot de passe pour vous connecter.</p>
         </div>
-        <a href="/panel/login" class="btn">🔐 Se connecter</a>
+        <a href="/panel/login" class="btn">🔐 Se connecter maintenant</a>
     </div>
 </body>
-</html>`;
-}
-
-
+</html>`);
+});
 
 // ========== MOT DE PASSE OUBLIÉ ==========
 
 app.get('/forgot-password', (req, res) => {
-    res.send(forgotPasswordHTML());
+    res.send(`<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Mot de passe oublié</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .card { 
+            background: white; 
+            border-radius: 24px; 
+            padding: 60px; 
+            max-width: 520px; 
+            width: 100%; 
+            box-shadow: 0 30px 80px rgba(0,0,0,0.3);
+            animation: slideUp 0.6s ease;
+        }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .icon { font-size: 80px; text-align: center; margin-bottom: 24px; }
+        h1 { 
+            text-align: center;
+            background: linear-gradient(135deg, #6366f1, #d946ef);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 32px; 
+            margin-bottom: 12px;
+            font-weight: 800;
+        }
+        .subtitle { text-align: center; color: #64748b; margin-bottom: 40px; font-size: 16px; }
+        .info { 
+            background: linear-gradient(135deg, #f0f9ff, #e0e7ff);
+            border-left: 4px solid #6366f1; 
+            padding: 24px; 
+            margin-bottom: 32px; 
+            border-radius: 16px;
+        }
+        .info h3 { color: #6366f1; font-size: 18px; margin-bottom: 12px; font-weight: 700; }
+        .info ol { color: #475569; padding-left: 24px; line-height: 2; }
+        .btn { 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            gap: 12px; 
+            background: linear-gradient(135deg, #6366f1, #d946ef);
+            color: white; 
+            padding: 20px; 
+            border-radius: 16px; 
+            text-decoration: none; 
+            font-weight: 700;
+            font-size: 17px;
+            transition: all 0.3s;
+            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
+        }
+        .btn:hover { transform: translateY(-3px); box-shadow: 0 20px 50px rgba(99, 102, 241, 0.5); }
+        .back { display: block; text-align: center; margin-top: 24px; color: #6366f1; text-decoration: none; font-weight: 600; }
+        .back:hover { color: #d946ef; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔐</div>
+        <h1>Mot de passe oublié ?</h1>
+        <p class="subtitle">Demandez une réinitialisation sécurisée</p>
+        <div class="info">
+            <h3>📋 Procédure</h3>
+            <ol>
+                <li>Connectez-vous avec Discord</li>
+                <li>Confirmez votre demande</li>
+                <li>Un admin validera</li>
+                <li>Recevez un MDP temporaire</li>
+                <li>Changez-le à la connexion</li>
+            </ol>
+        </div>
+        <a href="/auth/discord?action=reset" class="btn">🎮 Continuer avec Discord</a>
+        <a href="/panel/login" class="back">← Retour</a>
+    </div>
+</body>
+</html>`);
 });
 
 app.get('/password-reset-request', (req, res) => {
@@ -4679,7 +5016,19 @@ app.get('/password-reset-request', (req, res) => {
     if (!user) {
         const discord = req.session.discordUser.username + '#' + req.session.discordUser.discriminator;
         delete req.session.discordUser;
-        return res.send(resetAccountNotFoundHTML(discord));
+        return res.send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Compte non trouvé</title><style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #6366f1, #d946ef); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.card { background: white; border-radius: 24px; padding: 60px; max-width: 520px; width: 100%; box-shadow: 0 30px 80px rgba(0,0,0,0.3); text-align: center; }
+.icon { font-size: 80px; margin-bottom: 24px; }
+h1 { color: #ef4444; font-size: 28px; margin-bottom: 16px; font-weight: 800; }
+p { color: #64748b; margin-bottom: 20px; }
+.tag { background: #f1f5f9; padding: 16px; border-radius: 12px; margin: 24px 0; font-weight: 700; color: #5865F2; }
+.btn { display: inline-block; background: linear-gradient(135deg, #6366f1, #d946ef); color: white; padding: 16px 36px; border-radius: 12px; text-decoration: none; font-weight: 700; }
+</style></head><body><div class="card">
+<div class="icon">❌</div><h1>Compte non trouvé</h1><p>Aucun compte FTY lié à :</p><div class="tag">${discord}</div><p>Contactez un admin.</p>
+<a href="/panel/login" class="btn">Retour</a></div></body></html>`);
     }
     
     if (!db.resetRequests) db.resetRequests = [];
@@ -4687,10 +5036,73 @@ app.get('/password-reset-request', (req, res) => {
     
     if (pending) {
         delete req.session.discordUser;
-        return res.send(resetAlreadyPendingHTML());
+        return res.send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Demande en cours</title><style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #6366f1, #d946ef); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.card { background: white; border-radius: 24px; padding: 60px; max-width: 520px; width: 100%; box-shadow: 0 30px 80px rgba(0,0,0,0.3); text-align: center; }
+.icon { font-size: 80px; margin-bottom: 24px; }
+h1 { color: #f59e0b; font-size: 28px; margin-bottom: 16px; font-weight: 800; }
+p { color: #64748b; margin-bottom: 20px; line-height: 1.8; }
+.btn { display: inline-block; background: linear-gradient(135deg, #6366f1, #d946ef); color: white; padding: 16px 36px; border-radius: 12px; text-decoration: none; font-weight: 700; }
+</style></head><body><div class="card">
+<div class="icon">⏳</div><h1>Demande en cours</h1><p>Vous avez déjà une demande en attente.</p><p>Un admin la traitera prochainement.</p>
+<a href="/panel/login" class="btn">Retour</a></div></body></html>`);
     }
     
-    res.send(resetConfirmHTML(user, req.session.discordUser));
+    res.send(`<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Confirmer la demande</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #6366f1, #d946ef); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .card { background: white; border-radius: 24px; padding: 60px; max-width: 640px; width: 100%; box-shadow: 0 30px 80px rgba(0,0,0,0.3); }
+        .icon { font-size: 80px; text-align: center; margin-bottom: 24px; }
+        h1 { text-align: center; background: linear-gradient(135deg, #6366f1, #d946ef); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 32px; margin-bottom: 32px; font-weight: 800; }
+        .info { background: #f8fafc; border-radius: 16px; padding: 28px; margin-bottom: 32px; }
+        .info h3 { color: #6366f1; font-size: 18px; margin-bottom: 16px; font-weight: 700; }
+        .row { display: flex; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid #e2e8f0; }
+        .row:last-child { border-bottom: none; }
+        .label { color: #64748b; font-weight: 600; }
+        .value { color: #1e293b; font-weight: 700; }
+        .warning { background: linear-gradient(135deg, #fef3c7, #fde68a); border-left: 4px solid #f59e0b; padding: 24px; margin-bottom: 32px; border-radius: 16px; color: #92400e; line-height: 1.8; }
+        .btns { display: flex; gap: 16px; }
+        .btn { flex: 1; padding: 20px; border-radius: 16px; border: none; font-weight: 700; font-size: 17px; cursor: pointer; transition: all 0.3s; text-align: center; text-decoration: none; display: block; }
+        .btn-primary { background: linear-gradient(135deg, #6366f1, #d946ef); color: white; box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3); }
+        .btn-primary:hover { transform: translateY(-3px); box-shadow: 0 20px 50px rgba(99, 102, 241, 0.5); }
+        .btn-secondary { background: #e2e8f0; color: #475569; }
+        .btn-secondary:hover { background: #cbd5e1; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">✅</div>
+        <h1>Confirmer la demande</h1>
+        <div class="info">
+            <h3>📋 Informations du compte</h3>
+            <div class="row">
+                <span class="label">Identifiant FTY</span>
+                <span class="value">${user.username}</span>
+            </div>
+            <div class="row">
+                <span class="label">Discord</span>
+                <span class="value">${req.session.discordUser.username}#${req.session.discordUser.discriminator}</span>
+            </div>
+        </div>
+        <div class="warning">
+            <p><strong>⚠️ Important :</strong> Un admin validera et générera un mot de passe temporaire.</p>
+        </div>
+        <form action="/password-reset-submit" method="POST">
+            <div class="btns">
+                <button type="submit" class="btn btn-primary">✅ Envoyer la demande</button>
+                <a href="/panel/login" class="btn btn-secondary">❌ Annuler</a>
+            </div>
+        </form>
+    </div>
+</body>
+</html>`);
 });
 
 app.post('/password-reset-submit', (req, res) => {
@@ -4720,8 +5132,27 @@ app.post('/password-reset-submit', (req, res) => {
     addLog('Demande reset MDP', user.username, 'Reset', {}, getClientIP(req));
     
     delete req.session.discordUser;
-    res.send(resetRequestSentHTML());
+    
+    res.send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Demande envoyée</title><style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #6366f1, #d946ef); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.card { background: white; border-radius: 24px; padding: 60px; max-width: 520px; width: 100%; box-shadow: 0 30px 80px rgba(0,0,0,0.3); text-align: center; }
+.icon { font-size: 80px; margin-bottom: 24px; animation: success 0.8s ease; }
+@keyframes success { 0% { transform: scale(0); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }
+h1 { background: linear-gradient(135deg, #10b981, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 32px; margin-bottom: 16px; font-weight: 800; }
+p { color: #64748b; margin-bottom: 16px; line-height: 1.8; }
+.info { background: linear-gradient(135deg, #f0f9ff, #e0e7ff); padding: 24px; border-radius: 16px; margin: 28px 0; }
+.info p { color: #475569; font-size: 15px; }
+.btn { display: inline-block; background: linear-gradient(135deg, #6366f1, #d946ef); color: white; padding: 18px 40px; border-radius: 12px; text-decoration: none; font-weight: 700; margin-top: 20px; box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3); transition: all 0.3s; }
+.btn:hover { transform: translateY(-3px); }
+</style></head><body><div class="card">
+<div class="icon">✉️</div><h1>Demande envoyée !</h1><p>Votre demande a été transmise aux administrateurs.</p>
+<div class="info"><p><strong>Prochaine étape :</strong> Un admin validera et générera un mot de passe temporaire.</p></div>
+<a href="/panel/login" class="btn">Retour à la connexion</a></div></body></html>`);
 });
+
+// ========== GESTION ADMIN RESET MDP ==========
 
 app.get('/panel/admin/reset-requests', isAuthenticated, hasRole('administrateur'), (req, res) => {
     const db = readDB();
@@ -4742,30 +5173,35 @@ app.get('/panel/admin/reset-requests', isAuthenticated, hasRole('administrateur'
     
     ${req.query.success ? '<div class="alert alert-success">✅ ' + decodeURIComponent(req.query.success) + '</div>' : ''}
     
-    <div class="card">
+    <div class="card" style="background: linear-gradient(135deg, #f0f9ff 0%, #e0e7ff 100%); border: 2px solid #6366f1;">
         <div class="card-header">
             <h3>⏳ En attente (${pending.length})</h3>
         </div>
-        ${pending.length === 0 ? '<div style="padding:40px;text-align:center;color:#999"><div style="font-size:48px">✅</div><p>Aucune demande</p></div>' : `
+        ${pending.length === 0 ? '<div style="padding:50px;text-align:center;color:#64748b"><div style="font-size:64px;margin-bottom:16px">✅</div><p style="font-size:18px;font-weight:600">Aucune demande en attente</p></div>' : `
         <div class="table-responsive">
             <table class="table">
                 <thead>
-                    <tr><th>Utilisateur</th><th>Discord</th><th>Date</th><th>Actions</th></tr>
+                    <tr>
+                        <th>👤 Utilisateur</th>
+                        <th>💬 Discord</th>
+                        <th>📅 Date demande</th>
+                        <th>⚡ Actions</th>
+                    </tr>
                 </thead>
                 <tbody>
                     ${pending.map(r => `
                     <tr>
-                        <td><strong>${r.username}</strong></td>
+                        <td><strong style="color:#6366f1">${r.username}</strong></td>
                         <td>${r.discordUsername}</td>
                         <td>${new Date(r.requestedAt).toLocaleString('fr-FR')}</td>
                         <td>
                             <form action="/panel/admin/reset-approve" method="POST" style="display:inline">
                                 <input type="hidden" name="requestId" value="${r.id}">
-                                <button class="btn btn-sm btn-success">✅ Approuver</button>
+                                <button class="btn btn-sm btn-success" style="background: linear-gradient(135deg, #10b981, #6366f1); border: none; padding: 8px 16px; border-radius: 8px; color: white; font-weight: 600; cursor: pointer;">✅ Approuver</button>
                             </form>
-                            <form action="/panel/admin/reset-reject" method="POST" style="display:inline;margin-left:10px">
+                            <form action="/panel/admin/reset-reject" method="POST" style="display:inline;margin-left:12px">
                                 <input type="hidden" name="requestId" value="${r.id}">
-                                <button class="btn btn-sm btn-danger">❌ Refuser</button>
+                                <button class="btn btn-sm btn-danger" style="background: linear-gradient(135deg, #ef4444, #dc2626); border: none; padding: 8px 16px; border-radius: 8px; color: white; font-weight: 600; cursor: pointer;">❌ Refuser</button>
                             </form>
                         </td>
                     </tr>
@@ -4776,21 +5212,26 @@ app.get('/panel/admin/reset-requests', isAuthenticated, hasRole('administrateur'
         `}
     </div>
     
-    <div class="card" style="margin-top:30px">
-        <div class="card-header"><h3>📜 Historique</h3></div>
-        ${processed.length === 0 ? '<div style="padding:40px;text-align:center;color:#999">Aucun historique</div>' : `
+    <div class="card" style="margin-top:32px">
+        <div class="card-header"><h3>📜 Historique récent</h3></div>
+        ${processed.length === 0 ? '<div style="padding:40px;text-align:center;color:#94a3b8">Aucun historique</div>' : `
         <div class="table-responsive">
             <table class="table">
                 <thead>
-                    <tr><th>Utilisateur</th><th>Statut</th><th>Approuvé par</th><th>MDP temp</th></tr>
+                    <tr>
+                        <th>Utilisateur</th>
+                        <th>Statut</th>
+                        <th>Approuvé par</th>
+                        <th>MDP temporaire</th>
+                    </tr>
                 </thead>
                 <tbody>
                     ${processed.map(r => `
                     <tr>
                         <td>${r.username}</td>
-                        <td><span class="badge" style="background:${r.status === 'approved' ? '#27ae60' : '#e74c3c'}20;color:${r.status === 'approved' ? '#27ae60' : '#e74c3c'}">${r.status === 'approved' ? '✅ Approuvé' : '❌ Refusé'}</span></td>
+                        <td><span class="badge" style="background:${r.status === 'approved' ? 'linear-gradient(135deg, #10b981, #6366f1)' : 'linear-gradient(135deg, #ef4444, #dc2626)'};color:white;padding:6px 12px;border-radius:8px;font-weight:600">${r.status === 'approved' ? '✅ Approuvé' : '❌ Refusé'}</span></td>
                         <td>${r.approvedBy || '-'}</td>
-                        <td>${r.tempPassword ? '<code>' + r.tempPassword + '</code>' : '-'}</td>
+                        <td>${r.tempPassword ? '<code style="background:#f1f5f9;padding:6px 12px;border-radius:6px;font-weight:700;color:#6366f1">' + r.tempPassword + '</code>' : '-'}</td>
                     </tr>
                     `).join('')}
                 </tbody>
@@ -4828,7 +5269,7 @@ app.post('/panel/admin/reset-approve', isAuthenticated, hasRole('administrateur'
     writeDB(db);
     addLog('Reset approuvé', req.session.user.username, request.username, { tempPassword }, getClientIP(req));
     
-    res.redirect('/panel/admin/reset-requests?success=' + encodeURIComponent(`MDP temp: ${tempPassword}`));
+    res.redirect('/panel/admin/reset-requests?success=' + encodeURIComponent(`✅ MDP temporaire généré : ${tempPassword}`));
 });
 
 app.post('/panel/admin/reset-reject', isAuthenticated, hasRole('administrateur'), (req, res) => {
@@ -4847,239 +5288,8 @@ app.post('/panel/admin/reset-reject', isAuthenticated, hasRole('administrateur')
     writeDB(db);
     addLog('Reset refusé', req.session.user.username, request.username, {}, getClientIP(req));
     
-    res.redirect('/panel/admin/reset-requests?success=Demande refusée');
+    res.redirect('/panel/admin/reset-requests?success=' + encodeURIComponent('Demande refusée'));
 });
-
-function forgotPasswordHTML() {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Mot de passe oublié</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card { background: white; border-radius: 20px; padding: 50px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-        .icon { font-size: 64px; text-align: center; margin-bottom: 20px; }
-        h1 { text-align: center; color: #333; font-size: 28px; margin-bottom: 10px; }
-        .subtitle { text-align: center; color: #666; margin-bottom: 40px; }
-        .info { background: #f0f7ff; border-left: 4px solid #667eea; padding: 20px; margin-bottom: 30px; border-radius: 8px; }
-        .info h3 { color: #667eea; font-size: 16px; margin-bottom: 10px; }
-        .info ol { color: #555; padding-left: 20px; line-height: 1.8; }
-        .btn { display: flex; align-items: center; justify-content: center; gap: 12px; background: #5865F2; color: white; padding: 18px; border-radius: 12px; text-decoration: none; font-weight: 600; transition: all 0.3s; }
-        .btn:hover { background: #4752C4; transform: translateY(-2px); }
-        .back { display: block; text-align: center; margin-top: 20px; color: #667eea; text-decoration: none; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">🔐</div>
-        <h1>Mot de passe oublié ?</h1>
-        <p class="subtitle">Demandez une réinitialisation</p>
-        <div class="info">
-            <h3>📋 Procédure</h3>
-            <ol>
-                <li>Connectez-vous avec Discord</li>
-                <li>Confirmez votre demande</li>
-                <li>Un admin validera</li>
-                <li>Recevez un MDP temporaire</li>
-                <li>Changez-le à la connexion</li>
-            </ol>
-        </div>
-        <a href="/auth/discord?action=reset" class="btn">Continuer avec Discord</a>
-        <a href="/panel/login" class="back">← Retour</a>
-    </div>
-</body>
-</html>`;
-}
-
-function resetAccountNotFoundHTML(discord) {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Compte non trouvé</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card { background: white; border-radius: 20px; padding: 50px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
-        .icon { font-size: 64px; margin-bottom: 20px; }
-        h1 { color: #e74c3c; font-size: 24px; margin-bottom: 15px; }
-        p { color: #666; margin-bottom: 20px; }
-        .tag { background: #f8f9fa; padding: 15px; border-radius: 10px; margin: 20px 0; font-weight: 600; color: #5865F2; }
-        .btn { display: inline-block; background: #667eea; color: white; padding: 15px 30px; border-radius: 10px; text-decoration: none; font-weight: 600; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">❌</div>
-        <h1>Compte non trouvé</h1>
-        <p>Aucun compte FTY lié à :</p>
-        <div class="tag">${discord}</div>
-        <p>Contactez un admin.</p>
-        <a href="/panel/login" class="btn">Retour</a>
-    </div>
-</body>
-</html>`;
-}
-
-function resetAlreadyPendingHTML() {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Demande en cours</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card { background: white; border-radius: 20px; padding: 50px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
-        .icon { font-size: 64px; margin-bottom: 20px; }
-        h1 { color: #f39c12; font-size: 24px; margin-bottom: 15px; }
-        p { color: #666; margin-bottom: 20px; }
-        .btn { display: inline-block; background: #667eea; color: white; padding: 15px 30px; border-radius: 10px; text-decoration: none; font-weight: 600; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">⏳</div>
-        <h1>Demande en cours</h1>
-        <p>Vous avez déjà une demande en attente.</p>
-        <p>Un admin la traitera prochainement.</p>
-        <a href="/panel/login" class="btn">Retour</a>
-    </div>
-</body>
-</html>`;
-}
-
-function resetConfirmHTML(user, discord) {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Confirmer la demande</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card { background: white; border-radius: 20px; padding: 50px; max-width: 600px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-        .icon { font-size: 64px; text-align: center; margin-bottom: 20px; }
-        h1 { text-align: center; color: #333; font-size: 28px; margin-bottom: 30px; }
-        .info { background: #f8f9fa; border-radius: 12px; padding: 25px; margin-bottom: 30px; }
-        .info h3 { color: #667eea; font-size: 16px; margin-bottom: 15px; }
-        .row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e0e0e0; }
-        .row:last-child { border-bottom: none; }
-        .label { color: #666; font-weight: 500; }
-        .value { color: #333; font-weight: 600; }
-        .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin-bottom: 30px; border-radius: 8px; color: #856404; }
-        .btns { display: flex; gap: 15px; }
-        .btn { flex: 1; padding: 18px; border-radius: 12px; border: none; font-weight: 600; font-size: 16px; cursor: pointer; transition: all 0.3s; text-align: center; text-decoration: none; display: block; }
-        .btn-primary { background: #667eea; color: white; }
-        .btn-primary:hover { background: #5568d3; transform: translateY(-2px); }
-        .btn-secondary { background: #e0e0e0; color: #333; }
-        .btn-secondary:hover { background: #d0d0d0; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">✅</div>
-        <h1>Confirmer la demande</h1>
-        <div class="info">
-            <h3>📋 Compte</h3>
-            <div class="row">
-                <span class="label">Identifiant FTY</span>
-                <span class="value">${user.username}</span>
-            </div>
-            <div class="row">
-                <span class="label">Discord</span>
-                <span class="value">${discord.username}#${discord.discriminator}</span>
-            </div>
-        </div>
-        <div class="warning">
-            <p><strong>⚠️ Important :</strong> Un admin validera votre demande et génèrera un MDP temporaire.</p>
-        </div>
-        <form action="/password-reset-submit" method="POST">
-            <div class="btns">
-                <button type="submit" class="btn btn-primary">✅ Envoyer</button>
-                <a href="/panel/login" class="btn btn-secondary">❌ Annuler</a>
-            </div>
-        </form>
-    </div>
-</body>
-</html>`;
-}
-
-function resetRequestSentHTML() {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Demande envoyée</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card { background: white; border-radius: 20px; padding: 50px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
-        .icon { font-size: 64px; margin-bottom: 20px; }
-        h1 { color: #27ae60; font-size: 28px; margin-bottom: 15px; }
-        p { color: #666; margin-bottom: 15px; line-height: 1.8; }
-        .info { background: #f0f7ff; padding: 20px; border-radius: 10px; margin: 25px 0; }
-        .info p { color: #555; font-size: 14px; }
-        .btn { display: inline-block; background: #667eea; color: white; padding: 15px 40px; border-radius: 10px; text-decoration: none; font-weight: 600; margin-top: 20px; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">✉️</div>
-        <h1>Demande envoyée !</h1>
-        <p>Votre demande a été transmise aux admins.</p>
-        <div class="info">
-            <p><strong>Prochaine étape :</strong> Un admin validera et générera un MDP temporaire.</p>
-        </div>
-        <a href="/panel/login" class="btn">Retour à la connexion</a>
-    </div>
-</body>
-</html>`;
-}
-
-
 
 // ========== GUIDE INTERACTIF OBLIGATOIRE ==========
 
@@ -5094,7 +5304,321 @@ app.get('/panel/tutorial', isAuthenticated, (req, res) => {
     const user = req.session.user;
     if (user.hasCompletedTutorial) return res.redirect('/panel');
     
-    res.send(tutorialHTML(user));
+    res.send(`<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Bienvenue - FTY Club</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 920px; margin: 0 auto; }
+        .header { 
+            text-align: center; 
+            color: white; 
+            margin-bottom: 48px; 
+            animation: fadeIn 0.8s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .header h1 { 
+            font-size: 52px; 
+            margin-bottom: 12px;
+            font-weight: 900;
+            text-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .header p { font-size: 20px; opacity: 0.95; font-weight: 500; }
+        .card {
+            background: rgba(255, 255, 255, 0.98);
+            backdrop-filter: blur(20px);
+            border-radius: 28px;
+            padding: 60px;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.4);
+            margin-bottom: 32px;
+            display: none;
+            animation: slideIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(50px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .card.active { display: block; }
+        .steps { 
+            display: flex; 
+            justify-content: center; 
+            gap: 20px; 
+            margin-bottom: 48px;
+        }
+        .step { 
+            width: 16px; 
+            height: 16px; 
+            border-radius: 50%; 
+            background: rgba(255,255,255,0.3);
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            cursor: pointer;
+        }
+        .step.active { 
+            background: white;
+            transform: scale(1.6);
+            box-shadow: 0 0 20px rgba(255,255,255,0.8);
+        }
+        .icon { 
+            font-size: 96px; 
+            text-align: center; 
+            margin-bottom: 32px;
+            animation: bounce 2s ease-in-out infinite;
+        }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-15px); }
+        }
+        h2 { 
+            background: linear-gradient(135deg, #6366f1, #d946ef);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 40px; 
+            text-align: center; 
+            margin-bottom: 24px;
+            font-weight: 900;
+        }
+        .features { margin: 40px 0; }
+        .feature {
+            display: flex;
+            align-items: start;
+            gap: 24px;
+            padding: 24px;
+            background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+            border-radius: 16px;
+            margin-bottom: 16px;
+            transition: all 0.3s;
+        }
+        .feature:hover {
+            transform: translateX(8px);
+            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.2);
+        }
+        .feature-icon { 
+            font-size: 40px; 
+            flex-shrink: 0;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+        }
+        .feature-content h3 { 
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 20px; 
+            margin-bottom: 8px;
+            font-weight: 700;
+        }
+        .feature-content p { color: #64748b; line-height: 1.7; }
+        .btns { display: flex; gap: 20px; margin-top: 48px; }
+        .btn {
+            flex: 1;
+            padding: 22px;
+            border-radius: 16px;
+            border: none;
+            font-weight: 700;
+            font-size: 18px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .btn-primary { 
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            color: white;
+            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.4);
+        }
+        .btn-primary:hover { 
+            transform: translateY(-4px);
+            box-shadow: 0 20px 50px rgba(99, 102, 241, 0.6);
+        }
+        .btn-secondary { 
+            background: #e2e8f0;
+            color: #475569;
+        }
+        .btn-secondary:hover { 
+            background: #cbd5e1;
+            transform: translateY(-2px);
+        }
+        .role-badge {
+            display: inline-block;
+            padding: 12px 24px;
+            border-radius: 24px;
+            font-weight: 700;
+            margin: 24px auto;
+            display: block;
+            text-align: center;
+            max-width: 280px;
+            font-size: 18px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚽ Bienvenue sur FTY Club !</h1>
+            <p>Découvrez toutes les fonctionnalités de votre panel</p>
+        </div>
+        
+        <div class="steps">
+            <div class="step active"></div>
+            <div class="step"></div>
+            <div class="step"></div>
+            <div class="step"></div>
+        </div>
+        
+        <div class="card active" data-step="1">
+            <div class="icon">👋</div>
+            <h2>Bienvenue ${user.firstName || user.username} !</h2>
+            <p style="text-align: center; color: #64748b; font-size: 19px; margin-bottom: 32px;">
+                Vous êtes membre FTY en tant que :
+            </p>
+            <div class="role-badge" style="background: ${ROLE_COLORS[user.accountType]}; color: white;">
+                ${ROLE_LABELS[user.accountType]}
+            </div>
+            <p style="text-align: center; color: #64748b; margin-top: 32px; font-size: 17px; line-height: 1.8;">
+                Ce guide rapide présente les principales fonctionnalités de votre panel. Prenez 2 minutes pour le découvrir !
+            </p>
+            <div class="btns">
+                <button class="btn btn-primary" onclick="next()">Commencer le guide →</button>
+            </div>
+        </div>
+        
+        <div class="card" data-step="2">
+            <div class="icon">🧭</div>
+            <h2>Navigation du Panel</h2>
+            <div class="features">
+                <div class="feature">
+                    <div class="feature-icon">🏠</div>
+                    <div class="feature-content">
+                        <h3>Tableau de bord</h3>
+                        <p>Vue d'ensemble de votre activité et accès rapide à toutes les sections</p>
+                    </div>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">📋</div>
+                    <div class="feature-content">
+                        <h3>Sections thématiques</h3>
+                        <p>Chaque section est organisée par thème pour une navigation intuitive</p>
+                    </div>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">👤</div>
+                    <div class="feature-content">
+                        <h3>Profil utilisateur</h3>
+                        <p>Personnalisez vos informations, votre thème et vos préférences</p>
+                    </div>
+                </div>
+            </div>
+            <div class="btns">
+                <button class="btn btn-secondary" onclick="prev()">← Retour</button>
+                <button class="btn btn-primary" onclick="next()">Suivant →</button>
+            </div>
+        </div>
+        
+        <div class="card" data-step="3">
+            <div class="icon">⚙️</div>
+            <h2>Vos Fonctionnalités</h2>
+            <p style="text-align: center; color: #64748b; margin-bottom: 32px; font-size: 18px;">
+                En tant que <strong style="color: #6366f1;">${ROLE_LABELS[user.accountType]}</strong>, vous avez accès à :
+            </p>
+            <div class="features">
+                ${HIERARCHY[user.accountType] >= HIERARCHY['owner'] ? `
+                <div class="feature">
+                    <div class="feature-icon">👑</div>
+                    <div class="feature-content">
+                        <h3>Gestion complète</h3>
+                        <p>Accès total à tous les paramètres et configurations du club</p>
+                    </div>
+                </div>
+                ` : ''}
+                ${HIERARCHY[user.accountType] >= HIERARCHY['administrateur'] ? `
+                <div class="feature">
+                    <div class="feature-icon">🛡️</div>
+                    <div class="feature-content">
+                        <h3>Administration</h3>
+                        <p>Gestion des utilisateurs, sanctions, logs et demandes de reset</p>
+                    </div>
+                </div>
+                ` : ''}
+                <div class="feature">
+                    <div class="feature-icon">👤</div>
+                    <div class="feature-content">
+                        <h3>Profil personnel</h3>
+                        <p>Personnalisez votre expérience et gérez vos paramètres</p>
+                    </div>
+                </div>
+            </div>
+            <div class="btns">
+                <button class="btn btn-secondary" onclick="prev()">← Retour</button>
+                <button class="btn btn-primary" onclick="next()">Suivant →</button>
+            </div>
+        </div>
+        
+        <div class="card" data-step="4">
+            <div class="icon">🚀</div>
+            <h2>Vous êtes prêt !</h2>
+            <p style="text-align: center; color: #64748b; font-size: 19px; margin-bottom: 36px;">
+                Vous connaissez maintenant l'essentiel du panel FTY Club
+            </p>
+            <div class="features">
+                <div class="feature">
+                    <div class="feature-icon">💡</div>
+                    <div class="feature-content">
+                        <h3>Besoin d'aide ?</h3>
+                        <p>Utilisez le système de tickets pour contacter le support</p>
+                    </div>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🌓</div>
+                    <div class="feature-content">
+                        <h3>Thème sombre/clair</h3>
+                        <p>Changez le thème dans votre profil pour un confort optimal</p>
+                    </div>
+                </div>
+            </div>
+            <form action="/panel/tutorial/complete" method="POST">
+                <div class="btns">
+                    <button type="button" class="btn btn-secondary" onclick="prev()">← Retour</button>
+                    <button type="submit" class="btn btn-primary">✅ Terminer et accéder au panel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        let current = 1;
+        
+        function update() {
+            document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+            document.querySelector('.card[data-step="' + current + '"]').classList.add('active');
+            document.querySelectorAll('.step').forEach((s, i) => {
+                s.classList.toggle('active', i < current);
+            });
+        }
+        
+        function next() {
+            if (current < 4) {
+                current++;
+                update();
+            }
+        }
+        
+        function prev() {
+            if (current > 1) {
+                current--;
+                update();
+            }
+        }
+    </script>
+</body>
+</html>`);
 });
 
 app.post('/panel/tutorial/complete', isAuthenticated, (req, res) => {
@@ -5111,270 +5635,116 @@ app.post('/panel/tutorial/complete', isAuthenticated, (req, res) => {
     res.redirect('/panel');
 });
 
-function tutorialHTML(user) {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Bienvenue - FTY Club</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container { max-width: 900px; margin: 0 auto; }
-        .header { text-align: center; color: white; margin-bottom: 40px; animation: fadeIn 0.8s ease; }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .header h1 { font-size: 42px; margin-bottom: 10px; }
-        .header p { font-size: 18px; opacity: 0.9; }
-        .card {
-            background: white;
-            border-radius: 20px;
-            padding: 50px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            margin-bottom: 30px;
-            display: none;
-            animation: slideIn 0.5s ease;
-        }
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateX(30px); }
-            to { opacity: 1; transform: translateX(0); }
-        }
-        .card.active { display: block; }
-        .steps { display: flex; justify-content: center; gap: 15px; margin-bottom: 40px; }
-        .step { width: 12px; height: 12px; border-radius: 50%; background: #e0e0e0; transition: all 0.3s; }
-        .step.active { background: #667eea; transform: scale(1.5); }
-        .icon { font-size: 72px; text-align: center; margin-bottom: 30px; }
-        h2 { color: #333; font-size: 32px; text-align: center; margin-bottom: 20px; }
-        .features { margin: 30px 0; }
-        .feature {
-            display: flex;
-            align-items: start;
-            gap: 20px;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 12px;
-            margin-bottom: 15px;
-        }
-        .feature-icon { font-size: 32px; flex-shrink: 0; }
-        .feature-content h3 { color: #667eea; font-size: 18px; margin-bottom: 8px; }
-        .feature-content p { color: #666; line-height: 1.6; }
-        .btns { display: flex; gap: 15px; margin-top: 40px; }
-        .btn {
-            flex: 1;
-            padding: 18px;
-            border-radius: 12px;
-            border: none;
-            font-weight: 600;
-            font-size: 16px;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        .btn-primary { background: #667eea; color: white; }
-        .btn-primary:hover { background: #5568d3; transform: translateY(-2px); }
-        .btn-secondary { background: #e0e0e0; color: #333; }
-        .btn-secondary:hover { background: #d0d0d0; }
-        .role-badge {
-            display: inline-block;
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-weight: 600;
-            margin: 20px auto;
-            display: block;
-            text-align: center;
-            max-width: 250px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>⚽ Bienvenue sur FTY Club !</h1>
-            <p>Découvrez toutes les fonctionnalités</p>
-        </div>
-        
-        <div class="steps">
-            <div class="step active" data-step="1"></div>
-            <div class="step" data-step="2"></div>
-            <div class="step" data-step="3"></div>
-            <div class="step" data-step="4"></div>
-        </div>
-        
-        <!-- Étape 1 -->
-        <div class="card active" data-step="1">
-            <div class="icon">👋</div>
-            <h2>Bienvenue ${user.firstName || user.username} !</h2>
-            <p style="text-align: center; color: #666; font-size: 18px; margin-bottom: 30px;">
-                Vous êtes membre FTY en tant que :
-            </p>
-            <div class="role-badge" style="background: ${ROLE_COLORS[user.accountType]}20; color: ${ROLE_COLORS[user.accountType]}">
-                ${ROLE_LABELS[user.accountType]}
-            </div>
-            <p style="text-align: center; color: #666; margin-top: 30px;">
-                Ce guide rapide présente les principales fonctionnalités.
-            </p>
-            <div class="btns">
-                <button class="btn btn-primary" onclick="nextStep()">Commencer →</button>
-            </div>
-        </div>
-        
-        <!-- Étape 2 -->
-        <div class="card" data-step="2">
-            <div class="icon">🧭</div>
-            <h2>Navigation</h2>
-            <div class="features">
-                <div class="feature">
-                    <div class="feature-icon">🏠</div>
-                    <div class="feature-content">
-                        <h3>Tableau de bord</h3>
-                        <p>Vue d'ensemble et accès rapide</p>
-                    </div>
-                </div>
-                <div class="feature">
-                    <div class="feature-icon">📋</div>
-                    <div class="feature-content">
-                        <h3>Sections thématiques</h3>
-                        <p>Organisées par fonction</p>
-                    </div>
-                </div>
-                <div class="feature">
-                    <div class="feature-icon">👤</div>
-                    <div class="feature-content">
-                        <h3>Profil</h3>
-                        <p>Gérez vos informations et thème</p>
-                    </div>
-                </div>
-            </div>
-            <div class="btns">
-                <button class="btn btn-secondary" onclick="prevStep()">← Retour</button>
-                <button class="btn btn-primary" onclick="nextStep()">Suivant →</button>
-            </div>
-        </div>
-        
-        <!-- Étape 3 -->
-        <div class="card" data-step="3">
-            <div class="icon">⚙️</div>
-            <h2>Vos fonctionnalités</h2>
-            <p style="text-align: center; color: #666; margin-bottom: 30px;">
-                En tant que <strong>${ROLE_LABELS[user.accountType]}</strong>, vous avez accès à :
-            </p>
-            <div class="features">
-                ${HIERARCHY[user.accountType] >= HIERARCHY['owner'] ? `
-                <div class="feature">
-                    <div class="feature-icon">👑</div>
-                    <div class="feature-content">
-                        <h3>Gestion complète</h3>
-                        <p>Accès total aux paramètres</p>
-                    </div>
-                </div>
-                ` : ''}
-                ${HIERARCHY[user.accountType] >= HIERARCHY['administrateur'] ? `
-                <div class="feature">
-                    <div class="feature-icon">🛡️</div>
-                    <div class="feature-content">
-                        <h3>Administration</h3>
-                        <p>Users, sanctions, logs, resets</p>
-                    </div>
-                </div>
-                ` : ''}
-                <div class="feature">
-                    <div class="feature-icon">👤</div>
-                    <div class="feature-content">
-                        <h3>Profil personnel</h3>
-                        <p>Personnalisez votre expérience</p>
-                    </div>
-                </div>
-            </div>
-            <div class="btns">
-                <button class="btn btn-secondary" onclick="prevStep()">← Retour</button>
-                <button class="btn btn-primary" onclick="nextStep()">Suivant →</button>
-            </div>
-        </div>
-        
-        <!-- Étape 4 -->
-        <div class="card" data-step="4">
-            <div class="icon">🚀</div>
-            <h2>Vous êtes prêt !</h2>
-            <p style="text-align: center; color: #666; font-size: 18px; margin-bottom: 30px;">
-                Vous connaissez l'essentiel
-            </p>
-            <div class="features">
-                <div class="feature">
-                    <div class="feature-icon">💡</div>
-                    <div class="feature-content">
-                        <h3>Besoin d'aide ?</h3>
-                        <p>Utilisez les tickets support</p>
-                    </div>
-                </div>
-                <div class="feature">
-                    <div class="feature-icon">🌓</div>
-                    <div class="feature-content">
-                        <h3>Thème</h3>
-                        <p>Changez dans votre profil</p>
-                    </div>
-                </div>
-            </div>
-            <form action="/panel/tutorial/complete" method="POST">
-                <div class="btns">
-                    <button type="button" class="btn btn-secondary" onclick="prevStep()">← Retour</button>
-                    <button type="submit" class="btn btn-primary">✅ Terminer</button>
-                </div>
-            </form>
-        </div>
-    </div>
+// Modifier route /panel pour utiliser requireTutorial
+const panelRouteIndex = app._router.stack.findIndex(
+    layer => layer.route && layer.route.path === '/panel' && 
+    layer.route.methods.get && 
+    layer.route.stack.length > 0
+);
+
+if (panelRouteIndex !== -1) {
+    const originalHandlers = app._router.stack[panelRouteIndex].route.stack.map(s => s.handle);
+    app._router.stack.splice(panelRouteIndex, 1);
     
-    <script>
-        let current = 1;
-        const total = 4;
-        
-        function updateStep() {
-            document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
-            document.querySelector('.card[data-step="' + current + '"]').classList.add('active');
-            
-            document.querySelectorAll('.step').forEach((s, i) => {
-                if (i < current) s.classList.add('active');
-                else s.classList.remove('active');
-            });
-        }
-        
-        function nextStep() {
-            if (current < total) {
-                current++;
-                updateStep();
-            }
-        }
-        
-        function prevStep() {
-            if (current > 1) {
-                current--;
-                updateStep();
-            }
-        }
-    </script>
-</body>
-</html>`;
+    app.get('/panel', isAuthenticated, requireTutorial, ...originalHandlers);
 }
-
-
 
 // ========== PAGES PUBLIQUES ==========
 
 app.get('/boutique', (req, res) => {
-    res.send(publicLayout('Boutique', boutiquePageHTML()));
+    res.send(publicLayout('Boutique', `
+    <div style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%); padding: 120px 20px; text-align: center; color: white;">
+        <h1 style="font-size: 56px; margin-bottom: 24px; font-weight: 900; text-shadow: 0 4px 20px rgba(0,0,0,0.3);">🛍️ Boutique FTY Club</h1>
+        <p style="font-size: 22px; opacity: 0.95; font-weight: 500;">Merchandising officiel - Bientôt disponible</p>
+    </div>
+    <div style="max-width: 1200px; margin: 80px auto; padding: 0 20px;">
+        <div style="text-align: center; margin-bottom: 80px;">
+            <h2 style="font-size: 44px; background: linear-gradient(135deg, #6366f1, #d946ef); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 24px; font-weight: 900;">Produits à venir</h2>
+            <p style="color: #64748b; font-size: 20px; font-weight: 500;">La boutique officielle sera bientôt lancée</p>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 40px;">
+            <div style="background: white; border-radius: 24px; padding: 40px; box-shadow: 0 20px 60px rgba(0,0,0,0.1); text-align: center; transition: all 0.3s; cursor: pointer;" onmouseover="this.style.transform='translateY(-10px)'" onmouseout="this.style.transform='translateY(0)'">
+                <div style="font-size: 80px; margin-bottom: 24px;">👕</div>
+                <h3 style="background: linear-gradient(135deg, #6366f1, #d946ef); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 28px; margin-bottom: 16px; font-weight: 800;">Maillots officiels</h3>
+                <p style="color: #64748b; line-height: 1.8; font-size: 16px;">Domicile, extérieur et third kit avec personnalisation</p>
+            </div>
+            <div style="background: white; border-radius: 24px; padding: 40px; box-shadow: 0 20px 60px rgba(0,0,0,0.1); text-align: center; transition: all 0.3s; cursor: pointer;" onmouseover="this.style.transform='translateY(-10px)'" onmouseout="this.style.transform='translateY(0)'">
+                <div style="font-size: 80px; margin-bottom: 24px;">🧢</div>
+                <h3 style="background: linear-gradient(135deg, #6366f1, #d946ef); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 28px; margin-bottom: 16px; font-weight: 800;">Accessoires</h3>
+                <p style="color: #64748b; line-height: 1.8; font-size: 16px;">Casquettes, écharpes et goodies exclusifs</p>
+            </div>
+            <div style="background: white; border-radius: 24px; padding: 40px; box-shadow: 0 20px 60px rgba(0,0,0,0.1); text-align: center; transition: all 0.3s; cursor: pointer;" onmouseover="this.style.transform='translateY(-10px)'" onmouseout="this.style.transform='translateY(0)'">
+                <div style="font-size: 80px; margin-bottom: 24px;">🎮</div>
+                <h3 style="background: linear-gradient(135deg, #6366f1, #d946ef); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 28px; margin-bottom: 16px; font-weight: 800;">Gaming</h3>
+                <p style="color: #64748b; line-height: 1.8; font-size: 16px;">Périphériques et équipements gaming FTY</p>
+            </div>
+        </div>
+    </div>
+    `));
 });
 
 app.get('/partenaires', (req, res) => {
-    res.send(publicLayout('Partenaires', partenairesPageHTML()));
+    res.send(publicLayout('Partenaires', `
+    <div style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%); padding: 120px 20px; text-align: center; color: white;">
+        <h1 style="font-size: 56px; margin-bottom: 24px; font-weight: 900; text-shadow: 0 4px 20px rgba(0,0,0,0.3);">🤝 Nos Partenaires</h1>
+        <p style="font-size: 22px; opacity: 0.95; font-weight: 500;">Ils soutiennent FTY Club dans son développement</p>
+    </div>
+    <div style="max-width: 1200px; margin: 80px auto; padding: 0 20px;">
+        <div style="text-align: center; margin-bottom: 80px;">
+            <h2 style="font-size: 44px; background: linear-gradient(135deg, #6366f1, #d946ef); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 24px; font-weight: 900;">Partenaires officiels</h2>
+            <p style="color: #64748b; font-size: 20px; font-weight: 500;">Ensemble, nous construisons l'avenir de l'e-sport</p>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px;">
+            ${['🏢 Principal', '🎮 Gaming', '⚡ Énergie', '👕 Équipementier'].map(p => `
+            <div style="background: white; border-radius: 24px; padding: 50px; box-shadow: 0 20px 60px rgba(0,0,0,0.1); text-align: center; transition: all 0.3s;" onmouseover="this.style.transform='translateY(-10px)'" onmouseout="this.style.transform='translateY(0)'">
+                <div style="font-size: 64px; margin-bottom: 20px;">${p.split(' ')[0]}</div>
+                <h3 style="background: linear-gradient(135deg, #6366f1, #d946ef); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 24px; font-weight: 800;">${p.split(' ').slice(1).join(' ')}</h3>
+                <p style="color: #94a3b8; margin-top: 12px;">À venir</p>
+            </div>
+            `).join('')}
+        </div>
+    </div>
+    `));
 });
 
 app.get('/contact', (req, res) => {
-    res.send(publicLayout('Contact', contactPageHTML()));
+    res.send(publicLayout('Contact', `
+    <div style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%); padding: 120px 20px; text-align: center; color: white;">
+        <h1 style="font-size: 56px; margin-bottom: 24px; font-weight: 900; text-shadow: 0 4px 20px rgba(0,0,0,0.3);">📧 Contactez-nous</h1>
+        <p style="font-size: 22px; opacity: 0.95; font-weight: 500;">Une question ? Nous sommes à votre écoute</p>
+    </div>
+    <div style="max-width: 800px; margin: 80px auto; padding: 0 20px;">
+        <div style="background: white; border-radius: 28px; padding: 60px; box-shadow: 0 30px 80px rgba(0,0,0,0.15);">
+            <form action="/contact/submit" method="POST">
+                <div style="margin-bottom: 28px;">
+                    <label style="display: block; color: #1e293b; font-weight: 700; margin-bottom: 12px; font-size: 16px;">Nom complet</label>
+                    <input type="text" name="name" required style="width: 100%; padding: 18px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 16px; transition: all 0.3s;" onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e2e8f0'">
+                </div>
+                <div style="margin-bottom: 28px;">
+                    <label style="display: block; color: #1e293b; font-weight: 700; margin-bottom: 12px; font-size: 16px;">Email</label>
+                    <input type="email" name="email" required style="width: 100%; padding: 18px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 16px; transition: all 0.3s;" onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e2e8f0'">
+                </div>
+                <div style="margin-bottom: 28px;">
+                    <label style="display: block; color: #1e293b; font-weight: 700; margin-bottom: 12px; font-size: 16px;">Sujet</label>
+                    <select name="subject" required style="width: 100%; padding: 18px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 16px;">
+                        <option value="">Choisissez un sujet</option>
+                        <option value="partenariat">Partenariat</option>
+                        <option value="recrutement">Recrutement</option>
+                        <option value="media">Média / Presse</option>
+                        <option value="autre">Autre</option>
+                    </select>
+                </div>
+                <div style="margin-bottom: 28px;">
+                    <label style="display: block; color: #1e293b; font-weight: 700; margin-bottom: 12px; font-size: 16px;">Message</label>
+                    <textarea name="message" required rows="6" style="width: 100%; padding: 18px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 16px; resize: vertical; transition: all 0.3s;" onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e2e8f0'"></textarea>
+                </div>
+                <button type="submit" style="width: 100%; padding: 22px; background: linear-gradient(135deg, #6366f1, #d946ef); color: white; border: none; border-radius: 16px; font-weight: 700; font-size: 18px; cursor: pointer; transition: all 0.3s; box-shadow: 0 10px 30px rgba(99, 102, 241, 0.4);" onmouseover="this.style.transform='translateY(-3px)';this.style.boxShadow='0 20px 50px rgba(99, 102, 241, 0.6)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 10px 30px rgba(99, 102, 241, 0.4)'">
+                    📨 Envoyer le message
+                </button>
+            </form>
+        </div>
+    </div>
+    `));
 });
 
 app.post('/contact/submit', (req, res) => {
@@ -5390,147 +5760,23 @@ app.post('/contact/submit', (req, res) => {
     });
     
     writeDB(db);
-    res.send(contactSuccessHTML());
+    
+    res.send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Message envoyé</title><style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #6366f1, #d946ef); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.card { background: white; border-radius: 24px; padding: 60px; max-width: 520px; width: 100%; box-shadow: 0 30px 80px rgba(0,0,0,0.3); text-align: center; }
+.icon { font-size: 96px; margin-bottom: 32px; }
+h1 { background: linear-gradient(135deg, #10b981, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 36px; margin-bottom: 20px; font-weight: 900; }
+p { color: #64748b; margin-bottom: 32px; line-height: 1.8; font-size: 17px; }
+.btn { display: inline-block; padding: 18px 40px; background: linear-gradient(135deg, #6366f1, #d946ef); color: white; border-radius: 12px; text-decoration: none; font-weight: 700; box-shadow: 0 10px 30px rgba(99, 102, 241, 0.4); transition: all 0.3s; }
+.btn:hover { transform: translateY(-3px); }
+</style></head><body><div class="card">
+<div class="icon">✅</div><h1>Message envoyé !</h1><p>Merci pour votre message. Nous vous répondrons dans les plus brefs délais.</p>
+<a href="/" class="btn">Retour à l'accueil</a></div></body></html>`);
 });
 
-function boutiquePageHTML() {
-    return `
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 100px 20px; text-align: center; color: white;">
-        <h1 style="font-size: 48px; margin-bottom: 20px;">🛍️ Boutique FTY Club</h1>
-        <p style="font-size: 20px; opacity: 0.9;">Merchandising officiel - Bientôt disponible</p>
-    </div>
-    <div style="max-width: 1200px; margin: 60px auto; padding: 0 20px;">
-        <div style="text-align: center; margin-bottom: 60px;">
-            <h2 style="font-size: 36px; color: #333; margin-bottom: 20px;">Produits à venir</h2>
-            <p style="color: #666; font-size: 18px;">La boutique officielle sera bientôt lancée</p>
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px;">
-            <div style="background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); text-align: center;">
-                <div style="font-size: 64px; margin-bottom: 20px;">👕</div>
-                <h3 style="color: #333; font-size: 24px; margin-bottom: 15px;">Maillots</h3>
-                <p style="color: #666;">Domicile, extérieur, personnalisation</p>
-            </div>
-            <div style="background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); text-align: center;">
-                <div style="font-size: 64px; margin-bottom: 20px;">🧢</div>
-                <h3 style="color: #333; font-size: 24px; margin-bottom: 15px;">Accessoires</h3>
-                <p style="color: #666;">Casquettes, écharpes, goodies</p>
-            </div>
-            <div style="background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); text-align: center;">
-                <div style="font-size: 64px; margin-bottom: 20px;">🎮</div>
-                <h3 style="color: #333; font-size: 24px; margin-bottom: 15px;">Gaming</h3>
-                <p style="color: #666;">Périphériques FTY</p>
-            </div>
-        </div>
-    </div>
-    `;
-}
-
-function partenairesPageHTML() {
-    return `
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 100px 20px; text-align: center; color: white;">
-        <h1 style="font-size: 48px; margin-bottom: 20px;">🤝 Nos Partenaires</h1>
-        <p style="font-size: 20px; opacity: 0.9;">Ils soutiennent FTY Club</p>
-    </div>
-    <div style="max-width: 1200px; margin: 60px auto; padding: 0 20px;">
-        <div style="text-align: center; margin-bottom: 60px;">
-            <h2 style="font-size: 36px; color: #333; margin-bottom: 20px;">Partenaires officiels</h2>
-            <p style="color: #666; font-size: 18px;">Ensemble, nous construisons l'avenir</p>
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 30px;">
-            <div style="background: white; border-radius: 15px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); text-align: center;">
-                <div style="font-size: 48px; margin-bottom: 15px;">🏢</div>
-                <h3 style="color: #333; font-size: 20px;">Principal</h3>
-                <p style="color: #999; margin-top: 10px;">À venir</p>
-            </div>
-            <div style="background: white; border-radius: 15px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); text-align: center;">
-                <div style="font-size: 48px; margin-bottom: 15px;">🎮</div>
-                <h3 style="color: #333; font-size: 20px;">Gaming</h3>
-                <p style="color: #999; margin-top: 10px;">À venir</p>
-            </div>
-            <div style="background: white; border-radius: 15px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); text-align: center;">
-                <div style="font-size: 48px; margin-bottom: 15px;">👕</div>
-                <h3 style="color: #333; font-size: 20px;">Équipementier</h3>
-                <p style="color: #999; margin-top: 10px;">À venir</p>
-            </div>
-        </div>
-    </div>
-    `;
-}
-
-function contactPageHTML() {
-    return `
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 100px 20px; text-align: center; color: white;">
-        <h1 style="font-size: 48px; margin-bottom: 20px;">📧 Contactez-nous</h1>
-        <p style="font-size: 20px; opacity: 0.9;">Nous sommes à votre écoute</p>
-    </div>
-    <div style="max-width: 800px; margin: 60px auto; padding: 0 20px;">
-        <div style="background: white; border-radius: 20px; padding: 50px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);">
-            <form action="/contact/submit" method="POST">
-                <div style="margin-bottom: 25px;">
-                    <label style="display: block; color: #333; font-weight: 600; margin-bottom: 10px;">Nom</label>
-                    <input type="text" name="name" required style="width: 100%; padding: 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px;">
-                </div>
-                <div style="margin-bottom: 25px;">
-                    <label style="display: block; color: #333; font-weight: 600; margin-bottom: 10px;">Email</label>
-                    <input type="email" name="email" required style="width: 100%; padding: 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px;">
-                </div>
-                <div style="margin-bottom: 25px;">
-                    <label style="display: block; color: #333; font-weight: 600; margin-bottom: 10px;">Sujet</label>
-                    <select name="subject" required style="width: 100%; padding: 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px;">
-                        <option value="">Choisir</option>
-                        <option value="partenariat">Partenariat</option>
-                        <option value="recrutement">Recrutement</option>
-                        <option value="media">Média</option>
-                        <option value="autre">Autre</option>
-                    </select>
-                </div>
-                <div style="margin-bottom: 25px;">
-                    <label style="display: block; color: #333; font-weight: 600; margin-bottom: 10px;">Message</label>
-                    <textarea name="message" required rows="6" style="width: 100%; padding: 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px;"></textarea>
-                </div>
-                <button type="submit" style="width: 100%; padding: 18px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 10px; font-weight: 600; font-size: 16px; cursor: pointer;">
-                    📨 Envoyer
-                </button>
-            </form>
-        </div>
-    </div>
-    `;
-}
-
-function contactSuccessHTML() {
-    return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Message envoyé</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card { background: white; border-radius: 20px; padding: 50px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
-        .icon { font-size: 72px; margin-bottom: 20px; }
-        h1 { color: #27ae60; font-size: 32px; margin-bottom: 15px; }
-        p { color: #666; margin-bottom: 30px; }
-        .btn { display: inline-block; padding: 15px 40px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 10px; text-decoration: none; font-weight: 600; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">✅</div>
-        <h1>Message envoyé !</h1>
-        <p>Nous vous répondrons rapidement.</p>
-        <a href="/" class="btn">Retour</a>
-    </div>
-</body>
-</html>`;
-}
+console.log("🔥 SYSTÈME COMPLET CHARGÉ - TOUTES LES FONCTIONNALITÉS ACTIVES !");
 
 
 app.listen(PORT, () => {
