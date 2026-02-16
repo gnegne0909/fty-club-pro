@@ -1,10 +1,14 @@
 {
-  "name": "fty-club-pro-panel",
+  "name": "fty-club-pro",
   "version": "3.0.0",
-  "description": "Panel web FTY Club Pro - Enhanced",
-  "main": "server-ENHANCED.js",
+  "description": "FTY Club Pro - Panel complet V3 avec Discord OAuth, Geo-IP, Maintenance, Chatbot",
+  "main": "fty-club-pro-FINAL.js",
   "scripts": {
-    "start": "node server-ENHANCED.js"
+    "start": "node fty-club-pro-FINAL.js",
+    "dev": "nodemon fty-club-pro-FINAL.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -12,7 +16,10 @@
     "body-parser": "^1.20.2",
     "axios": "^1.6.7"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  },
+  "keywords": ["fty-club", "discord", "oauth", "e-sport"],
+  "author": "xywez",
+  "license": "ISC"
 }
