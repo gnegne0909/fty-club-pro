@@ -6,65 +6,79 @@ const path = require('path');
 const crypto = require('crypto');
 const axios = require('axios');
 
+const app = express();
+
 // ============================================================
-// ===        GÉO-IP & IP VISIBILITY SYSTEM               ===
+// ===           GÉO-IP MODULE V3                          ===
 // ============================================================
 const GEOIP_CACHE = {};
 
 async function getGeoIP(ip) {
-    if (!ip || ip === '127.0.0.1' || ip === 'unknown' || ip.startsWith('192.168') || ip.startsWith('10.') || ip.startsWith('172.')) {
-        return { country: 'Local', countryCode: 'LO', city: 'Localhost', isp: 'Local', emoji: '🏠', proxy: false, hosting: false };
+    if (!ip || ip === '127.0.0.1' || ip === 'unknown' || ip === '::1' ||
+        ip.startsWith('192.168') || ip.startsWith('10.') || ip.startsWith('172.')) {
+        return { country: 'Local', countryCode: 'LO', city: 'Localhost', isp: 'Réseau Local', emoji: '🏠', proxy: false, vpn: false };
     }
     if (GEOIP_CACHE[ip] && Date.now() - GEOIP_CACHE[ip].ts < 3600000) return GEOIP_CACHE[ip].data;
+
+    function toFlag(cc) {
+        if (!cc || cc.length !== 2) return '🌍';
+        try { return cc.toUpperCase().replace(/./g, c => String.fromCodePoint(0x1F1E0 + c.charCodeAt(0) - 65)); }
+        catch(e) { return '🌍'; }
+    }
+
+    // API 1: ipapi.co — HTTPS, fonctionne sur Render
     try {
-        const res = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,countryCode,city,isp,lat,lon,proxy,hosting`, { timeout: 3000 });
-        const d = res.data;
-        if (d.status === 'success') {
-            const flagEmoji = (d.countryCode || '').toUpperCase().replace(/./g, c => String.fromCodePoint(0x1F1E0 + c.charCodeAt(0) - 65));
-            const geo = { country: d.country||'?', countryCode: d.countryCode||'??', city: d.city||'?', isp: d.isp||'?', emoji: flagEmoji||'🌍', lat: d.lat, lon: d.lon, proxy: d.proxy||false, hosting: d.hosting||false };
+        const r = await axios.get(`https://ipapi.co/${ip}/json/`, {
+            timeout: 5000, headers: { 'User-Agent': 'FTYClubPro/3.0' }
+        });
+        const d = r.data;
+        if (d && d.country_name && !d.error && !d.reason) {
+            const geo = {
+                country: d.country_name || '?', countryCode: d.country_code || '??',
+                city: d.city || d.region || '?', isp: d.org || '?',
+                emoji: toFlag(d.country_code), lat: d.latitude, lon: d.longitude,
+                proxy: false, vpn: false, timezone: d.timezone || ''
+            };
             GEOIP_CACHE[ip] = { data: geo, ts: Date.now() };
             return geo;
         }
-    } catch(e) {}
-    return { country: 'Unknown', countryCode: '??', city: '?', isp: '?', emoji: '🌍', proxy: false, hosting: false };
+    } catch(e1) {}
+
+    // API 2: ip-api.com — HTTP fallback avec détection VPN/proxy
+    try {
+        const r = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,countryCode,city,isp,lat,lon,proxy,hosting`, { timeout: 5000 });
+        const d = r.data;
+        if (d && d.status === 'success') {
+            const geo = {
+                country: d.country || '?', countryCode: d.countryCode || '??',
+                city: d.city || '?', isp: d.isp || '?',
+                emoji: toFlag(d.countryCode), lat: d.lat, lon: d.lon,
+                proxy: d.proxy || false, vpn: d.proxy || d.hosting || false
+            };
+            GEOIP_CACHE[ip] = { data: geo, ts: Date.now() };
+            return geo;
+        }
+    } catch(e2) {}
+
+    // API 3: ipwho.is — dernier recours
+    try {
+        const r = await axios.get(`https://ipwho.is/${ip}`, { timeout: 5000 });
+        const d = r.data;
+        if (d && d.success !== false && d.country) {
+            const geo = {
+                country: d.country || '?', countryCode: d.country_code || '??',
+                city: d.city || d.region || '?', isp: (d.connection && d.connection.isp) || '?',
+                emoji: toFlag(d.country_code), lat: d.latitude, lon: d.longitude,
+                proxy: false, vpn: false
+            };
+            GEOIP_CACHE[ip] = { data: geo, ts: Date.now() };
+            return geo;
+        }
+    } catch(e3) {}
+
+    return { country: 'Inconnu', countryCode: '??', city: '?', isp: '?', emoji: '🌍', proxy: false, vpn: false };
 }
 
-// Règles de visibilité IP selon rang
-const IP_ACCESS = {
-    'xywez': 'ALL',            // Xywez voit TOUTES les IPs
-    'fondateur': 'BELOW',      // Fondateurs voient les IPs inférieures
-    'cofondateur': 'BELOW',    // Co-fondateurs voient les IPs inférieures
-    'owner': 'CONFIGURED',     // Owners voient selon la config Xywez
-    'manager': 'NONE',
-    'administrateur': 'NONE',
-    'moderateur': 'NONE',
-    'support': 'NONE',
-    'capitaine': 'NONE',
-    'joueur': 'NONE'
-};
-
-function canSeeIP(viewer, targetRole) {
-    if (!viewer) return false;
-    if (viewer.username === 'xywez') return true;
-    const vRole = viewer.role || viewer.accountType || 'joueur';
-    const vRank = HIERARCHY[vRole] || 0;
-    const tRank = HIERARCHY[targetRole] || 0;
-    // Fondateur / Co-fondateur voient les rangs inférieurs
-    if (vRole === 'fondateur' || vRole === 'cofondateur') return tRank < vRank;
-    // Owner voit selon config
-    if (vRole === 'owner' && viewer.ipAccess === true) return tRank < vRank;
-    return false;
-}
-
-function maskIP(ip) {
-    if (!ip) return 'N/A';
-    const parts = ip.split('.');
-    if (parts.length === 4) return `${parts[0]}.${parts[1]}.***.***`;
-    return '***.***.***';
-}
-
-
-const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Configuration Discord OAuth
@@ -189,24 +203,6 @@ function initDB() {
             ipAddress: null,
             platforms: ['PC'],
             sanctions: []
-        },
-        {
-            username: 'tom',
-            password: hashPassword('tom2026'),
-            accountType: 'cofondateur',
-            role: 'cofondateur',
-            loginAttempts: 0,
-            discordId: null,
-            discordUsername: 'Coketupue',
-            discordAvatar: null,
-            firstName: 'Tom',
-            lastName: '',
-            createdAt: new Date().toISOString(),
-            lastLogin: null,
-            ipAddress: null,
-            platforms: ['PC'],
-            sanctions: [],
-            permissions: { canSeeIPs: true, canViewLogs: true }
         }],
         applications: [],
         notifications: [],
@@ -216,6 +212,9 @@ function initDB() {
         logs: [],
         notes: [],
         blockedIPs: [],
+        whitelistedIPs: [],
+        publicSettings: {},
+        serverConfig: { configured: false, categories: {}, channels: {}, roles: {} },
         antiRaid: { enabled: true, joinThreshold: 5, timeWindow: 10, doubleCompteEnabled: true, antiLinkEnabled: true },
         dmTickets: []
     };
@@ -235,7 +234,30 @@ const DEFAULT_MATCHES = [
     { id: '2', adversaire: 'CHALLENGER ESports', date: '25/02/2026 - 21h00', competition: 'Coupe FTY', status: 'scheduled', score: null, stadium: 'FTY Arena' }
 ];
 const DEFAULT_STATS = { wins: 15, draws: 4, losses: 2, goals: 58, goalsAgainst: 21, winRate: 71.4 };
-const DEFAULT_SETTINGS = { maintenanceMode: false, maintenanceMessage: '' };
+const DEFAULT_SETTINGS = {
+    maintenanceMode: false,
+    maintenanceMessage: 'Le site est temporairement indisponible. Revenez bientôt !',
+};
+
+const DEFAULT_PUBLIC_SETTINGS = {
+    heroTitle: 'FTY CLUB PRO',
+    heroSubtitle: "L'équipe e-sport qui repousse les limites",
+    logoText: 'FTY',
+    primaryColor: '#9333ea',
+    accentColor: '#ec4899',
+    discordInvite: 'https://discord.gg/fty',
+    showStats: true,
+    showTactique: true,
+    showMatchs: true,
+    showEquipe: true,
+    chatbotEnabled: true,
+    guideEnabled: true,
+    announcementBanner: '',
+    announcementActive: false,
+    customFooter: '© 2026 FTY Club Pro - Tous droits réservés',
+    maintenanceMode: false,
+    maintenanceMessage: 'Site en maintenance. Revenez bientôt !'
+};
 
 function ensureDBFields(data) {
     let changed = false;
@@ -259,6 +281,17 @@ function ensureDBFields(data) {
         changed = true;
     }
     if (!data.settings || typeof data.settings !== 'object') { data.settings = { ...DEFAULT_SETTINGS }; changed = true; }
+    if (!Array.isArray(data.whitelistedIPs)) { data.whitelistedIPs = []; changed = true; }
+    if (!data.publicSettings || typeof data.publicSettings !== 'object') {
+        data.publicSettings = { ...DEFAULT_PUBLIC_SETTINGS }; changed = true;
+    } else {
+        for (const k of Object.keys(DEFAULT_PUBLIC_SETTINGS)) {
+            if (data.publicSettings[k] === undefined) { data.publicSettings[k] = DEFAULT_PUBLIC_SETTINGS[k]; changed = true; }
+        }
+    }
+    if (!data.serverConfig || typeof data.serverConfig !== 'object') {
+        data.serverConfig = { configured: false, categories: {}, channels: {}, roles: {} }; changed = true;
+    }
     if (data.communiques.length === 0) { data.communiques = DEFAULT_COMMUNIQUES; changed = true; }
     if (data.matches.length === 0) { data.matches = DEFAULT_MATCHES; changed = true; }
     // Migration users
@@ -292,16 +325,28 @@ function writeDB(data) {
 function addLog(action, executor, target, details, ip, ci) {
     const db = readDB();
     if (!db.logs) db.logs = [];
-    db.logs.unshift({
+    const entry = {
         id: Date.now().toString(), action, executor, target,
         details: details || {}, ip: ip || '',
         device: (ci && ci.device) || '',
         browser: (ci && ci.browser) || '',
         os: (ci && ci.os) || '',
-        timestamp: new Date().toISOString()
-    });
+        timestamp: new Date().toISOString(),
+        geo: null
+    };
+    db.logs.unshift(entry);
     if (db.logs.length > 10000) db.logs = db.logs.slice(0, 10000);
     writeDB(db);
+    // Enrichissement géo-IP en arrière-plan
+    if (ip && ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') {
+        getGeoIP(ip).then(geo => {
+            try {
+                const db2 = readDB();
+                const found = db2.logs.find(l => l.id === entry.id);
+                if (found) { found.geo = geo; writeDB(db2); }
+            } catch(e) {}
+        }).catch(() => {});
+    }
 }
 
 function hashPassword(password) {
@@ -389,22 +434,39 @@ function loginRateLimiter(req, res, next) {
     next();
 }
 
-// Vérification liste noire IPs (anti-VPN manuel)
+// Vérification liste noire IPs avec whitelist
 function checkBlockedIP(req, res, next) {
     const db = readDB();
     const ip = getClientIP(req);
+    // Whitelist bypass
+    if ((db.whitelistedIPs || []).find(w => w.ip === ip)) return next();
     const blocked = (db.blockedIPs || []).find(b => b.ip === ip);
     if (blocked) {
-        return res.status(403).send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>403</title>
-        <style>body{background:#0a0014;color:#fff;font-family:sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;text-align:center;padding:2rem;}</style></head>
-        <body><div style="font-size:4rem">🚫</div><h1>Accès Refusé</h1><p>Votre IP a été bloquée.<br>Raison : ${blocked.reason || 'N/A'}<br>Contactez un administrateur.</p></body></html>`);
+        return res.status(403).send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>403</title>
+        <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#000;color:#fff;font-family:sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:2rem;background:radial-gradient(ellipse at center,#1a0b2e,#000)}</style></head>
+        <body><div style="max-width:400px"><div style="font-size:5rem;margin-bottom:1rem">🚫</div><h1 style="color:#ef4444;font-size:2rem;margin-bottom:.75rem">Accès Refusé</h1><p style="color:rgba(255,255,255,.7)">Votre IP a été bloquée.<br>Raison : ${blocked.reason || 'N/A'}</p></div></body></html>`);
     }
     next();
 }
 
-// ✅ Middlewares de sécurité enregistrés après leur définition
+// Maintenance mode
+function checkMaintenance(req, res, next) {
+    if (req.path.startsWith('/panel') || req.path.startsWith('/auth') || req.path.startsWith('/api')) return next();
+    try {
+        const db = readDB();
+        const ps = db.publicSettings || {};
+        if (ps.maintenanceMode) {
+            return res.status(503).send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maintenance</title>
+            <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#000;color:#fff;font-family:sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:2rem;background:radial-gradient(ellipse at center,#1a0b2e,#000)}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}.badge{animation:pulse 2s infinite;display:inline-block;background:rgba(245,158,11,.2);color:#f59e0b;border:1px solid #f59e0b;padding:.5rem 1.5rem;border-radius:50px;font-weight:700;margin:1rem 0}</style></head>
+            <body><div style="max-width:500px"><div style="font-size:5rem;margin-bottom:1rem">🔧</div><h1 style="color:#9333ea;font-size:3rem;margin-bottom:.5rem">FTY CLUB PRO</h1><div class="badge">⚙️ Maintenance en cours</div><p style="color:rgba(255,255,255,.7);margin-top:.75rem">${ps.maintenanceMessage || 'Le site est temporairement indisponible. Revenez bientôt !'}</p></div></body></html>`);
+        }
+    } catch(e) {}
+    next();
+}
+
+// ✅ Middlewares de sécurité
 app.use(rateLimiter);
-app.use(checkBlockedIPv2);
+app.use(checkBlockedIP);
 app.use(checkMaintenance);
 
 // ===== NOTIFICATIONS =====
@@ -1616,60 +1678,6 @@ function publicLayout(title, content, theme = 'dark') {
         document.documentElement.setAttribute('data-theme', savedTheme);
         updateThemeIcon(savedTheme);
     </script>
-
-<!-- CHATBOT WIDGET FTY -->
-<div id="fty-chat" style="position:fixed;bottom:24px;right:24px;z-index:9999;">
-    <button id="chat-toggle" onclick="toggleChat()" style="width:60px;height:60px;border-radius:50%;background:linear-gradient(135deg,#9333ea,#ec4899);border:none;cursor:pointer;font-size:1.5rem;box-shadow:0 8px 32px rgba(147,51,234,.6);transition:transform .3s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">🤖</button>
-    <div id="chat-window" style="display:none;position:absolute;bottom:75px;right:0;width:320px;max-height:420px;background:#0f0318;border:2px solid #9333ea;border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(147,51,234,.4);flex-direction:column;">
-        <div style="background:linear-gradient(135deg,#9333ea,#ec4899);padding:1rem;display:flex;align-items:center;justify-content:space-between;">
-            <div style="display:flex;align-items:center;gap:.75rem;color:#fff;font-weight:700;">
-                <span>🤖</span><span>FTY Bot</span>
-                <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;"></span>
-            </div>
-            <button onclick="toggleChat()" style="background:none;border:none;color:#fff;font-size:1.25rem;cursor:pointer;">×</button>
-        </div>
-        <div id="chat-messages" style="flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.75rem;max-height:280px;">
-            <div class="msg bot-msg" style="background:rgba(147,51,234,.2);border-radius:8px 8px 8px 0;padding:.75rem;color:#fff;font-size:.9rem;max-width:85%;">👋 Bonjour ! Je suis le bot FTY. Comment puis-je t'aider ?</div>
-        </div>
-        <div style="padding:.75rem;border-top:1px solid rgba(147,51,234,.3);display:flex;gap:.5rem;">
-            <input id="chat-input" type="text" placeholder="Ton message..." onkeydown="if(event.key==='Enter')sendMsg()" style="flex:1;background:rgba(147,51,234,.15);border:1px solid rgba(147,51,234,.4);border-radius:8px;padding:.5rem .75rem;color:#fff;font-size:.9rem;outline:none;">
-            <button onclick="sendMsg()" style="background:linear-gradient(135deg,#9333ea,#ec4899);border:none;border-radius:8px;padding:.5rem .75rem;color:#fff;cursor:pointer;font-weight:700;">➤</button>
-        </div>
-    </div>
-</div>
-<script>
-function toggleChat() {
-    const w = document.getElementById('chat-window');
-    w.style.display = w.style.display === 'flex' ? 'none' : 'flex';
-    if (w.style.display === 'flex') document.getElementById('chat-input').focus();
-}
-async function sendMsg() {
-    const inp = document.getElementById('chat-input');
-    const msg = inp.value.trim();
-    if (!msg) return;
-    const msgs = document.getElementById('chat-messages');
-    msgs.innerHTML += '<div style="background:linear-gradient(135deg,rgba(147,51,234,.4),rgba(236,72,153,.3));border-radius:8px 8px 0 8px;padding:.75rem;color:#fff;font-size:.9rem;max-width:85%;align-self:flex-end;">'+msg+'</div>';
-    inp.value = '';
-    msgs.scrollTop = msgs.scrollHeight;
-    const typing = document.createElement('div');
-    typing.id = 'typing';
-    typing.style.cssText = 'background:rgba(147,51,234,.2);border-radius:8px 8px 8px 0;padding:.75rem;color:rgba(255,255,255,.6);font-size:.85rem;';
-    typing.textContent = '✏️ En train d\'écrire...';
-    msgs.appendChild(typing);
-    msgs.scrollTop = msgs.scrollHeight;
-    try {
-        const r = await fetch('/api/chatbot', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({message: msg}) });
-        const d = await r.json();
-        document.getElementById('typing')?.remove();
-        msgs.innerHTML += '<div style="background:rgba(147,51,234,.2);border-radius:8px 8px 8px 0;padding:.75rem;color:#fff;font-size:.9rem;max-width:85%;">'+(d.reply)+'</div>';
-    } catch(e) {
-        document.getElementById('typing')?.remove();
-        msgs.innerHTML += '<div style="background:rgba(147,51,234,.2);border-radius:8px 8px 8px 0;padding:.75rem;color:#fff;font-size:.9rem;">❌ Erreur de connexion</div>';
-    }
-    msgs.scrollTop = msgs.scrollHeight;
-}
-</script>
-
 </body>
 </html>`;
 }
@@ -2688,6 +2696,12 @@ function panelLayout(user, pageTitle, content, activePage) {
     menu.push({ icon: '📌', label: 'Mes Notes', href: '/panel/notes', id: 'notes' });
     menu.push({ icon: '👤', label: 'Mon Profil', href: '/panel/profile', id: 'profile' });
     if (user.role === 'capitaine' || HIERARCHY[user.role] >= HIERARCHY['manager']) menu.push({ icon: '🎯', label: 'Panel Capitaine', href: '/panel/capitaine', id: 'capitaine' });
+    if (user.role === 'owner') {
+        menu.push({ icon: '🔧', label: 'Maintenance', href: '/panel/owner/maintenance', id: 'maintenance' });
+        menu.push({ icon: '🎨', label: 'Site Public', href: '/panel/owner/public-settings', id: 'public-settings' });
+        menu.push({ icon: '🛡️', label: 'Gestion IP', href: '/panel/owner/ip-manager', id: 'ip-manager' });
+    }
+    if (HIERARCHY[user.role] >= HIERARCHY['moderateur']) menu.push({ icon: '🌍', label: 'Logs Géo-IP', href: '/panel/logs-geo', id: 'logs-geo' });
 
     const menuHTML = menu.map(item => `
         <a href="${item.href}" class="sidebar-link ${activePage === item.id ? 'active' : ''}">
@@ -2724,279 +2738,140 @@ function panelLayout(user, pageTitle, content, activePage) {
 %3C/svg%3E"><text y='0.9em' font-size='90'>⚽</text></svg>">
     <style>${GLOBAL_CSS}</style>
     <style>
-        /* Panel Layout */
-        .panel-container {
-            display: flex;
-            min-height: 100vh;
-            background: var(--bg-primary);
+        /* ── Panel Layout ── */
+        .panel-wrap{display:flex;min-height:100vh;background:var(--bg-primary)}
+        
+        /* SIDEBAR */
+        .sidebar{
+            width:260px;background:var(--bg-secondary);border-right:1px solid var(--border);
+            display:flex;flex-direction:column;position:fixed;height:100vh;left:0;top:0;z-index:200;
+            transition:transform .3s cubic-bezier(.4,0,.2,1);
+        }
+        .sidebar-hd{padding:1.25rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+        .sidebar-brand{font-family:var(--font-display);font-size:1.2rem;font-weight:900;background:linear-gradient(135deg,var(--primary),var(--secondary));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;text-decoration:none;}
+        .sidebar-user{padding:1rem 1.25rem;border-bottom:1px solid var(--border);}
+        .s-user-row{display:flex;align-items:center;gap:.75rem;}
+        .s-avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--primary),var(--secondary));display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;}
+        .s-name{font-size:.875rem;font-weight:700;margin-bottom:.2rem;}
+        .s-role{font-size:.7rem;padding:.1rem .5rem;border-radius:4px;display:inline-block;}
+        .sidebar-nav{flex:1;padding:.75rem 0;overflow-y:auto;scrollbar-width:none;}
+        .sidebar-nav::-webkit-scrollbar{display:none}
+        .sidebar-link{display:flex;align-items:center;gap:.75rem;padding:.7rem 1.25rem;color:var(--text-secondary);text-decoration:none;transition:all .15s;font-weight:500;font-size:.875rem;border-left:3px solid transparent;}
+        .sidebar-link:hover{background:var(--bg-tertiary);color:var(--text-primary);border-left-color:rgba(147,51,234,.4);}
+        .sidebar-link.active{background:rgba(147,51,234,.15);color:var(--text-primary);border-left-color:var(--primary);}
+        .sidebar-icon{font-size:1.1rem;width:22px;text-align:center;flex-shrink:0;}
+        .sidebar-ft{padding:1rem 1.25rem;border-top:1px solid var(--border);}
+        
+        /* MAIN */
+        .main-content{flex:1;margin-left:260px;padding:1.75rem;min-width:0;}
+        .page-header{margin-bottom:1.75rem;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:1rem;}
+        .page-title{font-size:1.75rem;font-weight:900;font-family:var(--font-display);margin-bottom:.25rem;line-height:1.2;}
+        .page-title span{background:linear-gradient(135deg,var(--primary),var(--secondary));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+        .page-breadcrumb{color:var(--text-muted);font-size:.8rem;}
+        
+        /* MOBILE HEADER */
+        .mob-hd{display:none;align-items:center;justify-content:space-between;padding:.875rem 1rem;background:var(--bg-secondary);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:150;}
+        .mob-menu-btn{background:var(--bg-tertiary);border:1px solid var(--border);width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1.25rem;flex-shrink:0;}
+        .mob-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:190;backdrop-filter:blur(4px);}
+        .mob-overlay.on{display:block;}
+        .sidebar-close-btn{display:none;background:none;border:none;color:var(--text-muted);font-size:1.5rem;cursor:pointer;padding:.25rem;}
+        
+        /* RESPONSIVE ── tablet */
+        @media(max-width:1024px){
+            .sidebar{width:240px}
+            .main-content{margin-left:240px}
         }
         
-        /* Sidebar */
-        .sidebar {
-            width: 280px;
-            background: var(--bg-secondary);
-            border-right: 1px solid var(--border);
-            display: flex;
-            flex-direction: column;
-            position: fixed;
-            height: 100vh;
-            left: 0;
-            top: 0;
-            z-index: 1000;
+        /* RESPONSIVE ── mobile */
+        @media(max-width:768px){
+            .sidebar{transform:translateX(-100%);width:280px;box-shadow:8px 0 40px rgba(0,0,0,.5);}
+            .sidebar.open{transform:translateX(0)}
+            .sidebar-close-btn{display:block}
+            .main-content{margin-left:0;padding:1rem;}
+            .mob-hd{display:flex}
+            .page-title{font-size:1.4rem}
+            .grid-2,.grid-3,.grid-4{grid-template-columns:1fr!important}
+            .card{padding:1.25rem;border-radius:12px}
+            table{font-size:.8rem}
+            .btn{padding:.7rem 1rem;font-size:.85rem}
+            /* Stack page-header on mobile */
+            .page-header{flex-direction:column;gap:.75rem;}
+            .page-header .btn{align-self:flex-start}
         }
         
-        .sidebar-header {
-            padding: 1.5rem;
-            border-bottom: 1px solid var(--border);
+        @media(min-width:769px){
+            .mob-hd{display:none!important}
         }
         
-        .sidebar-brand {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            font-family: var(--font-display);
-            font-size: 1.25rem;
-            font-weight: 900;
-            color: var(--text-primary);
-            text-decoration: none;
-        }
+        /* CARDS & STATS */
+        .card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;margin-bottom:1.5rem;}
+        .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;text-align:center;transition:transform .2s;}
+        .stat-card:hover{transform:translateY(-4px);}
+        .stat-icon{font-size:2rem;margin-bottom:.5rem;}
+        .stat-value{font-size:1.75rem;font-weight:900;font-family:var(--font-display);margin-bottom:.25rem;}
+        .stat-label{color:var(--text-muted);font-size:.8rem;}
         
-        .sidebar-user {
-            padding: 1rem 1.5rem;
-            border-bottom: 1px solid var(--border);
-        }
+        /* FORM ELEMENTS IN PANEL */
+        .form-group{margin-bottom:1.25rem}
+        .form-label{display:block;margin-bottom:.4rem;font-weight:600;font-size:.875rem;color:var(--text-secondary)}
+        .form-control{width:100%;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:.7rem .875rem;color:var(--text-primary);font-size:.9rem;font-family:inherit;outline:none;transition:border-color .2s}
+        .form-control:focus{border-color:var(--primary)}
+        textarea.form-control{resize:vertical;min-height:80px}
+        select.form-control{cursor:pointer}
+        .btn-sm{padding:.4rem .875rem;font-size:.8rem}
+        .btn-full{width:100%}
+        .btn-success{background:#10b98120;color:#10b981;border:1px solid #10b98140}
+        .btn-success:hover{background:#10b98140}
+        .btn-warning{background:#f59e0b20;color:#f59e0b;border:1px solid #f59e0b40}
+        .btn-warning:hover{background:#f59e0b40}
+        .btn-outline{background:transparent;color:var(--text-primary);border:1px solid var(--border)}
+        .btn-outline:hover{border-color:var(--primary);color:var(--primary)}
         
-        .sidebar-user-info {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }
+        /* TABLE */
+        table{width:100%;border-collapse:collapse}
+        th{padding:.75rem;text-align:left;color:var(--text-muted);font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;border-bottom:2px solid var(--border);}
+        td{padding:.75rem;border-bottom:1px solid var(--border);font-size:.875rem;vertical-align:middle;}
+        tr:hover td{background:rgba(147,51,234,.05)}
+        .overflow-table{overflow-x:auto;-webkit-overflow-scrolling:touch}
         
-        .sidebar-user-avatar {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.25rem;
-        }
-        
-        .sidebar-user-details h4 {
-            font-size: 0.875rem;
-            font-weight: 600;
-            margin: 0 0 0.25rem 0;
-        }
-        
-        .sidebar-user-role {
-            font-size: 0.75rem;
-            padding: 0.125rem 0.5rem;
-            border-radius: 4px;
-            display: inline-block;
-            background: ${roleColor}20;
-            color: ${roleColor};
-        }
-        
-        .sidebar-nav {
-            flex: 1;
-            padding: 1rem 0;
-            overflow-y: auto;
-        }
-        
-        .sidebar-link {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            padding: 0.75rem 1.5rem;
-            color: var(--text-secondary);
-            text-decoration: none;
-            transition: all 0.2s;
-            font-weight: 500;
-        }
-        
-        .sidebar-link:hover {
-            background: var(--bg-tertiary);
-            color: var(--text-primary);
-        }
-        
-        .sidebar-link.active {
-            background: var(--primary);
-            color: white;
-            border-right: 3px solid var(--secondary);
-        }
-        
-        .sidebar-icon {
-            font-size: 1.25rem;
-            width: 24px;
-            text-align: center;
-        }
-        
-        .sidebar-footer {
-            padding: 1rem 1.5rem;
-            border-top: 1px solid var(--border);
-        }
-        
-        /* Main Content */
-        .main-content {
-            flex: 1;
-            margin-left: 280px;
-            padding: 2rem;
-        }
-        
-        .page-header {
-            margin-bottom: 2rem;
-        }
-        
-        .page-title {
-            font-size: 2rem;
-            font-weight: 900;
-            font-family: var(--font-display);
-            margin-bottom: 0.5rem;
-        }
-        
-        .page-title span {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        
-        .page-breadcrumb {
-            color: var(--text-muted);
-            font-size: 0.875rem;
-        }
-        
-        /* Responsive */
-        @media (max-width: 768px) {
-            .sidebar {
-                transform: translateX(-100%);
-                transition: transform 0.3s;
-            }
-            
-            .sidebar.mobile-open {
-                transform: translateX(0);
-            }
-            
-            .main-content {
-                margin-left: 0;
-                padding: 1rem;
-            }
-            
-            .mobile-overlay {
-                display: none;
-                position: fixed;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: rgba(0, 0, 0, 0.5);
-                z-index: 999;
-            }
-            
-            .mobile-overlay.active {
-                display: block;
-            }
-            
-            .mobile-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 1rem;
-                background: var(--bg-secondary);
-                border-bottom: 1px solid var(--border);
-                position: sticky;
-                top: 0;
-                z-index: 100;
-            }
-            
-            .mobile-menu-btn {
-                background: var(--bg-tertiary);
-                border: 1px solid var(--border);
-                width: 40px;
-                height: 40px;
-                border-radius: 8px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                cursor: pointer;
-                font-size: 1.5rem;
-            }
-        }
-        
-        @media (min-width: 769px) {
-            .mobile-header {
-                display: none;
-            }
-        }
-        
-        /* Cards and other elements */
-        .card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-        }
-        
-        .stat-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 1.5rem;
-            text-align: center;
-        }
-        
-        .stat-icon {
-            font-size: 2.5rem;
-            margin-bottom: 0.5rem;
-        }
-        
-        .stat-value {
-            font-size: 2rem;
-            font-weight: 900;
-            font-family: var(--font-display);
-            margin-bottom: 0.25rem;
-        }
-        
-        .stat-label {
-            color: var(--text-muted);
-            font-size: 0.875rem;
-        }
+        /* ALERTS */
+        .alert{padding:1rem 1.25rem;border-radius:10px;margin-bottom:1.25rem;font-size:.875rem;}
+        .alert-success{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.4);color:#10b981;}
+        .alert-error{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.4);color:#ef4444;}
+        .alert-info{background:rgba(147,51,234,.15);border:1px solid rgba(147,51,234,.4);color:#c084fc;}
+        .alert-warning{background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.4);color:#f59e0b;}
     </style>
 </head>
 <body>
-    <!-- Mobile Overlay -->
-    <div class="mobile-overlay" id="mobileOverlay"></div>
+    <!-- Mobile overlay -->
+    <div class="mob-overlay" id="mobOverlay"></div>
     
-    <!-- Mobile Header -->
-    <div class="mobile-header">
-        <div style="font-family: var(--font-display); font-size: 1.25rem; font-weight: 900;">
-            <img src='data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='grad1' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%2300FFA3;stop-opacity:1' /%3E%3Cstop offset='100%25' style='stop-color:%2300D4FF;stop-opacity:1' /%3E%3C/linearGradient%3E%3Cfilter id='glow'%3E%3CfeGaussianBlur stdDeviation='2' result='coloredBlur'/%3E%3CfeMerge%3E%3CfeMergeNode in='coloredBlur'/%3E%3CfeMergeNode in='SourceGraphic'/%3E%3C/feMerge%3E%3C/filter%3E%3C/defs%3E%3Cpath d='M50 10 L80 30 L80 70 L50 90 L20 70 L20 30 Z' fill='url(%23grad1)' filter='url(%23glow)' stroke='%23FFF' stroke-width='2'/%3E%3Ccircle cx='50' cy='50' r='20' fill='%230A0E14' stroke='%23FFF' stroke-width='2'/%3E%3Ctext x='50' y='58' font-family='Rajdhani' font-size='22' font-weight='900' fill='%2300FFA3' text-anchor='middle'%3EFTY%3C/text%3E%3C/svg%3E' style='width: 32px; height: 32px; filter: drop-shadow(0 0 10px var(--primary-glow));' alt='FTY Logo'> FTY Club
-        </div>
-        <button class="mobile-menu-btn" id="mobileMenuBtn">☰</button>
-    </div>
+    <!-- Mobile top header -->
+    <header class="mob-hd">
+        <button class="mob-menu-btn" id="mobMenuBtn" aria-label="Menu">☰</button>
+        <a href="/" style="font-family:var(--font-display);font-size:1.1rem;font-weight:900;background:linear-gradient(135deg,var(--primary),var(--secondary));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;text-decoration:none;">⚽ FTY PANEL</a>
+        <a href="/panel/notifications" style="position:relative;text-decoration:none;font-size:1.35rem;padding:4px;">
+            🔔${unreadNotifs > 0 ? `<span style="position:absolute;top:0;right:0;background:#ef4444;color:#fff;border-radius:50%;min-width:16px;height:16px;font-size:.6rem;font-weight:900;display:flex;align-items:center;justify-content:center;">${unreadNotifs > 99 ? '99+' : unreadNotifs}</span>` : ''}
+        </a>
+    </header>
     
-    <div class="panel-container">
+    <div class="panel-wrap">
         <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <a href="/" class="sidebar-brand">
-                    <img src='data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='grad1' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%2300FFA3;stop-opacity:1' /%3E%3Cstop offset='100%25' style='stop-color:%2300D4FF;stop-opacity:1' /%3E%3C/linearGradient%3E%3Cfilter id='glow'%3E%3CfeGaussianBlur stdDeviation='2' result='coloredBlur'/%3E%3CfeMerge%3E%3CfeMergeNode in='coloredBlur'/%3E%3CfeMergeNode in='SourceGraphic'/%3E%3C/feMerge%3E%3C/filter%3E%3C/defs%3E%3Cpath d='M50 10 L80 30 L80 70 L50 90 L20 70 L20 30 Z' fill='url(%23grad1)' filter='url(%23glow)' stroke='%23FFF' stroke-width='2'/%3E%3Ccircle cx='50' cy='50' r='20' fill='%230A0E14' stroke='%23FFF' stroke-width='2'/%3E%3Ctext x='50' y='58' font-family='Rajdhani' font-size='22' font-weight='900' fill='%2300FFA3' text-anchor='middle'%3EFTY%3C/text%3E%3C/svg%3E' style='width: 32px; height: 32px; filter: drop-shadow(0 0 10px var(--primary-glow));' alt='FTY Logo'>
-                    <span>FTY Club</span>
-                </a>
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-hd">
+                <a href="/" class="sidebar-brand">⚽ FTY CLUB</a>
+                <button class="sidebar-close-btn" id="sidebarCloseBtn" aria-label="Fermer">×</button>
             </div>
             
             <div class="sidebar-user">
-                <div class="sidebar-user-info">
-                    <div class="sidebar-user-avatar">👤</div>
-                    <div class="sidebar-user-details">
-                        <h4>${user.username}</h4>
-                        <span class="sidebar-user-role">${roleLabel}</span>
+                <div class="s-user-row">
+                    <div class="s-avatar">👤</div>
+                    <div style="min-width:0;flex:1;">
+                        <div class="s-name">${user.username}</div>
+                        <span class="s-role" style="background:${roleColor}20;color:${roleColor};">${roleLabel}</span>
                     </div>
-                    <a href="/panel/notifications" title="Notifications" style="position:relative;text-decoration:none;font-size:1.35rem;margin-left:auto;padding:4px 6px;border-radius:8px;transition:background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='transparent'">
-                        🔔
-                        ${unreadNotifs > 0 ? `<span style="position:absolute;top:-2px;right:-2px;background:#ef4444;color:#fff;border-radius:50%;min-width:18px;height:18px;font-size:0.6rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0 3px;" id="notif-badge">${unreadNotifs > 99 ? '99+' : unreadNotifs}</span>` : `<span style="display:none" id="notif-badge">0</span>`}
+                    <a href="/panel/notifications" title="Notifications" style="position:relative;text-decoration:none;font-size:1.25rem;margin-left:.5rem;flex-shrink:0;">
+                        🔔${unreadNotifs > 0 ? `<span style="position:absolute;top:-2px;right:-2px;background:#ef4444;color:#fff;border-radius:50%;min-width:16px;height:16px;font-size:.6rem;font-weight:900;display:flex;align-items:center;justify-content:center;">${unreadNotifs > 99 ? '99+' : unreadNotifs}</span>` : ''}
                     </a>
                 </div>
             </div>
@@ -3005,8 +2880,8 @@ function panelLayout(user, pageTitle, content, activePage) {
                 ${menuHTML}
             </nav>
             
-            <div class="sidebar-footer">
-                <a href="/panel/logout" class="btn btn-full btn-danger" style="font-size: 0.875rem;">
+            <div class="sidebar-ft">
+                <a href="/panel/logout" class="btn btn-full" style="background:rgba(239,68,68,.15);color:#ef4444;border:1px solid rgba(239,68,68,.3);font-size:.85rem;padding:.7rem;">
                     🚪 Déconnexion
                 </a>
             </div>
@@ -3024,17 +2899,27 @@ function panelLayout(user, pageTitle, content, activePage) {
             document.documentElement.setAttribute('data-theme', theme);
             fetch('/api/update-theme', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme }) });
         }
-        // Mobile menu
-        const mobileMenuBtn = document.getElementById('mobileMenuBtn');
-        const sidebar = document.querySelector('.sidebar');
-        const mobileOverlay = document.getElementById('mobileOverlay');
-        if (mobileMenuBtn) {
-            mobileMenuBtn.addEventListener('click', () => { sidebar.classList.toggle('mobile-open'); mobileOverlay.classList.toggle('active'); });
-            mobileOverlay.addEventListener('click', () => { sidebar.classList.remove('mobile-open'); mobileOverlay.classList.remove('active'); });
-            document.querySelectorAll('.sidebar-link').forEach(link => {
-                link.addEventListener('click', () => { sidebar.classList.remove('mobile-open'); mobileOverlay.classList.remove('active'); });
-            });
+        // Mobile menu — new system
+        const sidebar = document.getElementById('sidebar');
+        const mobOverlay = document.getElementById('mobOverlay');
+        const mobMenuBtn = document.getElementById('mobMenuBtn');
+        const sidebarCloseBtn = document.getElementById('sidebarCloseBtn');
+        
+        function openSidebar() {
+            sidebar.classList.add('open');
+            mobOverlay.classList.add('on');
         }
+        function closeSidebar() {
+            sidebar.classList.remove('open');
+            mobOverlay.classList.remove('on');
+        }
+        if (mobMenuBtn) mobMenuBtn.addEventListener('click', openSidebar);
+        if (sidebarCloseBtn) sidebarCloseBtn.addEventListener('click', closeSidebar);
+        if (mobOverlay) mobOverlay.addEventListener('click', closeSidebar);
+        // Close on nav link click (mobile)
+        document.querySelectorAll('.sidebar-link').forEach(l => l.addEventListener('click', () => {
+            if (window.innerWidth <= 768) closeSidebar();
+        }));
 
         // ===== SYSTÈME DE NOTIFICATIONS PUSH (PC + Mobile) =====
         let _prevNotifCount = ${unreadNotifs};
@@ -4800,24 +4685,12 @@ app.post('/panel/capitaine/tactique', isAuthenticated, hasRole('capitaine'), (re
     
     if (!db.serverConfig) db.serverConfig = {};
     
-    const playerData = {};
-    // Extract player assignments from form
-    Object.keys(req.body).filter(k => k.startsWith('player_')).forEach(k => {
-        playerData[k.replace('player_','')] = req.body[k];
-    });
-    
     db.serverConfig.tactic = {
         formation,
         style,
         mentality,
-        instructions: instructions ? instructions.split('\n').filter(i => i.trim()) : [],
-        players: playerData,
-        updatedAt: new Date().toISOString(),
-        updatedBy: req.session.user.username
+        instructions: instructions.split('\n').filter(i => i.trim())
     };
-    
-    // Notify via Discord bot
-    callBotAPI('/api/tactic-update', 'POST', { formation, style, by: req.session.user.username }).catch(() => {});
     
     writeDB(db);
     
@@ -7174,871 +7047,640 @@ app.get('/panel/moderation/sanctions/:username', isAuthenticated, hasRole('moder
 });
 
 
-
-
-// ===== MODULES V3 INJECTÉS =====
-
 // ============================================================
-// ===     PERSONNALISATION PAGE PUBLIQUE (XYWEZ)         ===
+// ===           MODULES V3 — PANEL OWNER PAGES           ===
 // ============================================================
+
 function getPublicSettings(db) {
-    if (!db.publicSettings) {
-        db.publicSettings = {
-            heroTitle: 'FTY CLUB PRO',
-            heroSubtitle: 'La Team Gaming d\'Élite',
-            heroBackground: '#000000',
-            primaryColor: '#9333ea',
-            accentColor: '#ec4899',
-            logoText: '⚽ FTY',
-            announcementBanner: '',
-            announcementActive: false,
-            showStats: true,
-            showTactique: true,
-            showMatchs: true,
-            showEquipe: true,
-            discordInvite: '',
-            customFooter: 'FTY Club Pro © 2026',
-            maintenanceMode: false,
-            maintenanceMessage: '🔧 Site en maintenance. Revenez bientôt.',
-            chatbotEnabled: true,
-            chatbotName: 'FTY Bot',
-            chatbotColor: '#9333ea',
-            guideEnabled: true,
-        };
-    }
-    return db.publicSettings;
+    return Object.assign({}, DEFAULT_PUBLIC_SETTINGS, db.publicSettings || {});
 }
 
-// Panel owner: personnalisation
-app.get('/panel/owner/public-settings', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez.'));
-    const db = readDB();
-    const ps = getPublicSettings(db);
-    const content = `
-    <div class="page-header">
-        <div>
-            <div class="page-title">🎨 <span>Personnalisation Publique</span></div>
-            <div class="page-breadcrumb">Panel · Owner · Apparence Site Public</div>
-        </div>
-    </div>
-    ${req.query.success ? `<div class="alert alert-success">✅ ${decodeURIComponent(req.query.success)}</div>` : ''}
-    ${req.query.error ? `<div class="alert alert-danger">❌ ${decodeURIComponent(req.query.error)}</div>` : ''}
-    <form action="/panel/owner/public-settings" method="POST">
-    <div class="grid-2">
-    <div class="card">
-        <h3 class="card-title" style="margin-bottom:1.5rem;">🏠 Hero Section</h3>
-        <div class="form-group"><label class="form-label">Titre Principal</label>
-            <input type="text" name="heroTitle" class="form-control" value="${ps.heroTitle||'FTY CLUB PRO'}"></div>
-        <div class="form-group"><label class="form-label">Sous-titre</label>
-            <input type="text" name="heroSubtitle" class="form-control" value="${ps.heroSubtitle||''}"></div>
-        <div class="form-group"><label class="form-label">Texte Logo</label>
-            <input type="text" name="logoText" class="form-control" value="${ps.logoText||'⚽ FTY'}"></div>
-        <div class="form-group"><label class="form-label">Invitation Discord (lien)</label>
-            <input type="text" name="discordInvite" class="form-control" value="${ps.discordInvite||''}" placeholder="https://discord.gg/..."></div>
-        <div class="form-group"><label class="form-label">Footer personnalisé</label>
-            <input type="text" name="customFooter" class="form-control" value="${ps.customFooter||'FTY Club Pro © 2026'}"></div>
-    </div>
-    <div class="card">
-        <h3 class="card-title" style="margin-bottom:1.5rem;">🎨 Couleurs & Sections</h3>
-        <div class="form-group"><label class="form-label">Couleur Primaire</label>
-            <input type="color" name="primaryColor" value="${ps.primaryColor||'#9333ea'}" style="width:100%;height:50px;border-radius:8px;border:none;cursor:pointer;"></div>
-        <div class="form-group"><label class="form-label">Couleur Accent</label>
-            <input type="color" name="accentColor" value="${ps.accentColor||'#ec4899'}" style="width:100%;height:50px;border-radius:8px;border:none;cursor:pointer;"></div>
-        <div class="form-group"><label class="form-label">Sections visibles</label>
-            <div style="display:flex;flex-direction:column;gap:.75rem;margin-top:.5rem;">
-                <label><input type="checkbox" name="showStats" ${ps.showStats?'checked':''}> 📊 Statistiques</label>
-                <label><input type="checkbox" name="showTactique" ${ps.showTactique?'checked':''}> 🎯 Tactique</label>
-                <label><input type="checkbox" name="showMatchs" ${ps.showMatchs?'checked':''}> ⚽ Matchs</label>
-                <label><input type="checkbox" name="showEquipe" ${ps.showEquipe?'checked':''}> 👥 Équipe</label>
-                <label><input type="checkbox" name="chatbotEnabled" ${ps.chatbotEnabled?'checked':''}> 🤖 Chatbot</label>
-                <label><input type="checkbox" name="guideEnabled" ${ps.guideEnabled?'checked':''}> 📖 Guide</label>
-            </div>
-        </div>
-    </div>
-    </div>
-    <div class="card" style="margin-top:1.5rem;">
-        <h3 class="card-title" style="margin-bottom:1.5rem;">📢 Bannière d'Annonce</h3>
-        <div class="grid-2">
-            <div class="form-group"><label class="form-label">Message Bannière</label>
-                <input type="text" name="announcementBanner" class="form-control" value="${ps.announcementBanner||''}" placeholder="Nouveau match ce soir 20h !"></div>
-            <div class="form-group"><label class="form-label">Afficher Bannière</label>
-                <select name="announcementActive" class="form-control">
-                    <option value="true" ${ps.announcementActive?'selected':''}>✅ Oui</option>
-                    <option value="false" ${!ps.announcementActive?'selected':''}>❌ Non</option>
-                </select>
-            </div>
-        </div>
-    </div>
-    <div style="margin-top:1.5rem;"><button type="submit" class="btn btn-primary">💾 Sauvegarder</button></div>
-    </form>
-    `;
-    res.send(panelLayout(user, 'Personnalisation Publique', content, 'owner'));
-});
-
-app.post('/panel/owner/public-settings', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez.'));
-    const db = readDB();
-    if (!db.publicSettings) db.publicSettings = {};
-    const ps = db.publicSettings;
-    const b = req.body;
-    ps.heroTitle = b.heroTitle || 'FTY CLUB PRO';
-    ps.heroSubtitle = b.heroSubtitle || '';
-    ps.logoText = b.logoText || '⚽ FTY';
-    ps.discordInvite = b.discordInvite || '';
-    ps.customFooter = b.customFooter || 'FTY Club Pro © 2026';
-    ps.primaryColor = b.primaryColor || '#9333ea';
-    ps.accentColor = b.accentColor || '#ec4899';
-    ps.showStats = b.showStats === 'on' || b.showStats === 'true' || !!b.showStats;
-    ps.showTactique = b.showTactique === 'on' || b.showTactique === 'true' || !!b.showTactique;
-    ps.showMatchs = b.showMatchs === 'on' || b.showMatchs === 'true' || !!b.showMatchs;
-    ps.showEquipe = b.showEquipe === 'on' || b.showEquipe === 'true' || !!b.showEquipe;
-    ps.chatbotEnabled = b.chatbotEnabled === 'on' || b.chatbotEnabled === 'true' || !!b.chatbotEnabled;
-    ps.guideEnabled = b.guideEnabled === 'on' || b.guideEnabled === 'true' || !!b.guideEnabled;
-    ps.announcementBanner = b.announcementBanner || '';
-    ps.announcementActive = b.announcementActive === 'true';
-    writeDB(db);
-    addLog('🎨 Personnalisation publique modifiée', user.username, 'Public Settings', {}, getClientIP(req), getClientInfo(req));
-    res.redirect('/panel/owner/public-settings?success=' + encodeURIComponent('Paramètres sauvegardés !'));
-});
-
-
-// ============================================================
-// ===         MODE MAINTENANCE (XYWEZ UNIQUEMENT)        ===
-// ============================================================
+// ── Maintenance Panel ──────────────────────────────────────
 app.get('/panel/owner/maintenance', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez uniquement.'));
     const db = readDB();
     const ps = getPublicSettings(db);
     const content = `
     <div class="page-header">
-        <div>
-            <div class="page-title">🔧 <span>Mode Maintenance</span></div>
-            <div class="page-breadcrumb">Panel · Owner · Maintenance</div>
-        </div>
+        <div><div class="page-title">🔧 Mode <span>Maintenance</span></div>
+        <div class="page-breadcrumb">Contrôle d'accès au site public</div></div>
     </div>
-    ${req.query.success ? `<div class="alert alert-success">✅ ${decodeURIComponent(req.query.success)}</div>` : ''}
-    <div class="card" style="border:2px solid ${ps.maintenanceMode?'#f59e0b':'#22c55e'};">
-        <div style="display:flex;align-items:center;gap:1.5rem;margin-bottom:2rem;">
-            <div style="font-size:4rem;">${ps.maintenanceMode?'🔧':'✅'}</div>
+    <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;margin-bottom:1.5rem;">
             <div>
-                <h2 style="color:${ps.maintenanceMode?'#f59e0b':'#22c55e'}">
-                    ${ps.maintenanceMode ? 'MAINTENANCE ACTIVE' : 'SITE EN LIGNE'}
-                </h2>
-                <p style="color:var(--text-secondary);">Le mode maintenance bloque l'accès au site public (sauf panel).</p>
+                <h3 style="margin-bottom:.5rem;">État actuel</h3>
+                <span style="font-size:1.5rem;font-weight:900;color:${ps.maintenanceMode?'#f59e0b':'#10b981'}">
+                    ${ps.maintenanceMode?'🔧 MAINTENANCE ACTIVE':'✅ SITE EN LIGNE'}
+                </span>
             </div>
+            <form action="/panel/owner/maintenance/toggle" method="POST">
+                <button type="submit" class="btn ${ps.maintenanceMode?'btn-success':'btn-warning'}" style="font-size:1.1rem;padding:1rem 2rem;">
+                    ${ps.maintenanceMode?'✅ Remettre en ligne':'🔧 Activer la maintenance'}
+                </button>
+            </form>
         </div>
-        <form action="/panel/owner/maintenance/toggle" method="POST" style="display:inline;">
-            <button type="submit" class="btn" style="background:${ps.maintenanceMode?'#22c55e':'#f59e0b'};color:#000;font-weight:900;">
-                ${ps.maintenanceMode ? '✅ Désactiver Maintenance' : '🔧 Activer Maintenance'}
-            </button>
-        </form>
-    </div>
-    <div class="card" style="margin-top:1.5rem;">
-        <h3 style="margin-bottom:1.5rem;">💬 Message de Maintenance</h3>
         <form action="/panel/owner/maintenance/message" method="POST">
             <div class="form-group">
-                <label class="form-label">Message affiché aux visiteurs</label>
-                <textarea name="message" class="form-control" rows="4">${ps.maintenanceMessage||'🔧 Site en maintenance. Revenez bientôt.'}</textarea>
+                <label class="form-label">Message de maintenance</label>
+                <textarea name="message" class="form-control" rows="3" placeholder="Ex: Mise à jour en cours...">${ps.maintenanceMessage||''}</textarea>
             </div>
-            <button type="submit" class="btn btn-primary">💾 Sauvegarder message</button>
+            <button type="submit" class="btn btn-primary">💾 Sauvegarder le message</button>
         </form>
-    </div>
-    <div class="card" style="margin-top:1.5rem;">
-        <h3 style="margin-bottom:1rem;">📊 Infos Système</h3>
-        <div class="grid-2">
-            <div style="padding:1rem;background:var(--bg-tertiary);border-radius:8px;">
-                <div style="color:var(--text-muted);font-size:.85rem;">Uptime</div>
-                <div style="font-size:1.25rem;font-weight:700;">${formatUptime(Date.now())}</div>
-            </div>
-            <div style="padding:1rem;background:var(--bg-tertiary);border-radius:8px;">
-                <div style="color:var(--text-muted);font-size:.85rem;">Membres</div>
-                <div style="font-size:1.25rem;font-weight:700;">${require('./fty-club-pro-v3').getDB ? '...' : (readDB().users||[]).length}</div>
-            </div>
-        </div>
-    </div>
-    `;
-    res.send(panelLayout(user, 'Maintenance', content, 'owner'));
+    </div>`;
+    res.send(panelLayout(req.session.user, 'Maintenance', content, 'maintenance'));
 });
 
-function formatUptime(startTs) {
-    // Returns time since process start
-    const up = Math.floor(process.uptime());
-    const d = Math.floor(up/86400), h = Math.floor((up%86400)/3600), m = Math.floor((up%3600)/60);
-    return d > 0 ? `${d}j ${h}h ${m}m` : `${h}h ${m}m`;
-}
-
 app.post('/panel/owner/maintenance/toggle', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez.'));
     const db = readDB();
-    const ps = getPublicSettings(db);
-    ps.maintenanceMode = !ps.maintenanceMode;
-    db.publicSettings = ps;
+    if (!db.publicSettings) db.publicSettings = {};
+    db.publicSettings.maintenanceMode = !db.publicSettings.maintenanceMode;
     writeDB(db);
-    callBotAPI('/api/maintenance', 'POST', { enabled: ps.maintenanceMode });
-    addLog(`🔧 Maintenance ${ps.maintenanceMode?'activée':'désactivée'}`, user.username, 'Système', {}, getClientIP(req), getClientInfo(req));
-    res.redirect('/panel/owner/maintenance?success=' + encodeURIComponent(`Maintenance ${ps.maintenanceMode?'activée':'désactivée'}`));
+    addLog('MAINTENANCE_TOGGLE', req.session.user.username, 'system', { mode: db.publicSettings.maintenanceMode }, getClientIP(req));
+    res.redirect('/panel/owner/maintenance');
 });
 
 app.post('/panel/owner/maintenance/message', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez.'));
     const db = readDB();
-    const ps = getPublicSettings(db);
-    ps.maintenanceMessage = req.body.message || '🔧 Site en maintenance.';
-    db.publicSettings = ps;
+    if (!db.publicSettings) db.publicSettings = {};
+    db.publicSettings.maintenanceMessage = req.body.message || '';
     writeDB(db);
-    res.redirect('/panel/owner/maintenance?success=' + encodeURIComponent('Message sauvegardé'));
+    res.redirect('/panel/owner/maintenance?success=1');
 });
 
-// Middleware maintenance
-function checkMaintenance(req, res, next) {
-    if (req.path.startsWith('/panel') || req.path.startsWith('/auth') || req.path.startsWith('/api')) return next();
-    const db = readDB();
-    const ps = db.publicSettings || {};
-    if (ps.maintenanceMode) {
-        return res.status(503).send(`<!DOCTYPE html><html lang="fr" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maintenance - FTY Club Pro</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#000;color:#fff;font-family:'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:2rem;background:radial-gradient(ellipse at center,#1a0b2e 0%,#000 70%)}h1{font-size:3rem;color:#9333ea;margin-bottom:1rem}p{color:rgba(255,255,255,.7);font-size:1.2rem;margin-bottom:2rem}.badge{display:inline-block;background:rgba(245,158,11,.2);color:#f59e0b;border:1px solid #f59e0b;padding:.5rem 1.5rem;border-radius:50px;font-weight:700;animation:pulse 2s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}</style></head><body><div><div style="font-size:5rem;margin-bottom:1.5rem">🔧</div><h1>FTY CLUB PRO</h1><div class="badge">Maintenance en cours</div><p style="margin-top:1.5rem">${ps.maintenanceMessage||'Le site est temporairement indisponible.'}</p><p style="font-size:.9rem;color:rgba(255,255,255,.4)">Revenez bientôt !</p></div></body></html>`);
-    }
-    next();
-}
-
-
-// ============================================================
-// ===         GESTION IP (BLOCK / WHITELIST)              ===
-// ============================================================
-function getWhitelistedIPs(db) {
-    if (!Array.isArray(db.whitelistedIPs)) db.whitelistedIPs = [];
-    return db.whitelistedIPs;
-}
-
-// Enhanced checkBlockedIP with whitelist
-function checkBlockedIPv2(req, res, next) {
-    const db = readDB();
-    const ip = getClientIP(req);
-    const whitelisted = (db.whitelistedIPs || []).find(w => w.ip === ip);
-    if (whitelisted) return next(); // Whitelist bypass everything
-    const blocked = (db.blockedIPs || []).find(b => b.ip === ip);
-    if (blocked) {
-        return res.status(403).send(`<!DOCTYPE html><html lang="fr" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>403 - Accès Refusé</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#000;color:#fff;font-family:'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:2rem;background:radial-gradient(ellipse at center,#1a0b2e 0%,#000 70%)}h1{font-size:2.5rem;color:#ef4444;margin-bottom:1rem}</style></head><body><div><div style="font-size:5rem;margin-bottom:1.5rem">🚫</div><h1>Accès Refusé</h1><p style="color:rgba(255,255,255,.7);font-size:1.1rem;margin-bottom:.5rem">Votre adresse IP a été bloquée.</p><p style="color:rgba(255,255,255,.4);font-size:.9rem">Raison: ${blocked.reason||'N/A'}</p><p style="color:rgba(255,255,255,.3);font-size:.8rem;margin-top:1rem">Contactez le support si vous pensez qu'il s'agit d'une erreur.</p></div></body></html>`);
-    }
-    next();
-}
-
-// Panel IP Management (Xywez uniquement pour whitelist, Owner+ pour block)
+// ── IP Manager ────────────────────────────────────────────
 app.get('/panel/owner/ip-manager', isAuthenticated, hasRole('owner'), async (req, res) => {
-    const user = req.session.user;
     const db = readDB();
     const blocked = db.blockedIPs || [];
     const whitelisted = db.whitelistedIPs || [];
-    const isXywez = user.username === 'xywez';
-    
-    // Enrich avec géo-IP
-    const enrichedBlocked = await Promise.all(blocked.map(async b => {
-        const geo = await getGeoIP(b.ip);
-        return { ...b, geo };
+    const isXywez = req.session.user.discordId === SUPER_ADMIN_DISCORD_ID || req.session.user.username === 'xywez';
+
+    // Enrich avec geo
+    const enriched = await Promise.all(blocked.slice(0,50).map(async b => {
+        if (!b.geo && b.ip) { try { b.geo = await getGeoIP(b.ip); } catch(e){} }
+        return b;
     }));
-    const enrichedWhite = await Promise.all(whitelisted.map(async w => {
-        const geo = await getGeoIP(w.ip);
-        return { ...w, geo };
-    }));
-    
+
     const content = `
     <div class="page-header">
-        <div>
-            <div class="page-title">🛡️ <span>Gestionnaire IP</span></div>
-            <div class="page-breadcrumb">Panel · Owner · Sécurité IP</div>
+        <div><div class="page-title">🛡️ Gestionnaire <span>IP</span></div>
+        <div class="page-breadcrumb">${blocked.length} IP bloquée(s) · ${whitelisted.length} en whitelist</div></div>
+    </div>
+    <div class="grid-2" style="gap:1.5rem;margin-bottom:1.5rem;">
+        <div class="card">
+            <h3 style="margin-bottom:1rem;">🚫 Bloquer une IP</h3>
+            <form action="/panel/owner/ip-manager/block" method="POST">
+                <div class="form-group">
+                    <label class="form-label">Adresse IP</label>
+                    <input type="text" name="ip" class="form-control" placeholder="1.2.3.4" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Raison</label>
+                    <input type="text" name="reason" class="form-control" placeholder="Raison du blocage">
+                </div>
+                <button type="submit" class="btn btn-danger btn-full">🚫 Bloquer</button>
+            </form>
         </div>
+        ${isXywez ? `<div class="card">
+            <h3 style="margin-bottom:1rem;">✅ Whitelister une IP</h3>
+            <form action="/panel/owner/ip-manager/whitelist" method="POST">
+                <div class="form-group">
+                    <label class="form-label">Adresse IP</label>
+                    <input type="text" name="ip" class="form-control" placeholder="1.2.3.4" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Note</label>
+                    <input type="text" name="note" class="form-control" placeholder="Ex: IP de confiance">
+                </div>
+                <button type="submit" class="btn btn-success btn-full">✅ Whitelister</button>
+            </form>
+        </div>` : '<div class="card"><p style="color:var(--text-muted);text-align:center;padding:2rem;">🔒 Whitelist réservée à Xywez</p></div>'}
     </div>
-    ${req.query.success ? `<div class="alert alert-success">✅ ${decodeURIComponent(req.query.success)}</div>` : ''}
-    ${req.query.error ? `<div class="alert alert-danger">❌ ${decodeURIComponent(req.query.error)}</div>` : ''}
-    
-    <div class="grid-2">
     <div class="card">
-        <h3 style="color:#ef4444;margin-bottom:1.5rem;">🚫 Bloquer une IP</h3>
-        <form action="/panel/owner/ip-manager/block" method="POST">
-            <div class="form-group"><label class="form-label">Adresse IP</label>
-                <input type="text" name="ip" class="form-control" placeholder="1.2.3.4" required></div>
-            <div class="form-group"><label class="form-label">Raison</label>
-                <input type="text" name="reason" class="form-control" placeholder="Comportement suspect"></div>
-            <button type="submit" class="btn" style="background:#ef4444;color:#fff;width:100%">🚫 Bloquer</button>
-        </form>
+        <h3 style="margin-bottom:1rem;">🚫 IPs Bloquées (${blocked.length})</h3>
+        ${blocked.length === 0 ? '<p style="color:var(--text-muted);text-align:center;padding:2rem;">Aucune IP bloquée.</p>' :
+        '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">' +
+        '<thead><tr style="border-bottom:2px solid var(--border);"><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">IP</th><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">GÉO</th><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">RAISON</th><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">PAR</th><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">ACTION</th></tr></thead>' +
+        '<tbody>' + enriched.map(b => {
+            const g = b.geo || {};
+            const vpnBadge = g.vpn ? '<span style="background:#ef444430;color:#ef4444;border:1px solid #ef4444;border-radius:4px;padding:1px 6px;font-size:.7rem;margin-left:4px;">VPN</span>' : '';
+            return `<tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:.75rem;font-family:monospace;font-size:.85rem;">${b.ip}</td>
+                <td style="padding:.75rem;">${g.emoji||'🌍'} ${g.city||'?'}, ${g.country||'?'}${vpnBadge}</td>
+                <td style="padding:.75rem;color:var(--text-muted);font-size:.85rem;">${b.reason||'-'}</td>
+                <td style="padding:.75rem;font-size:.85rem;">${b.blockedBy||'-'}</td>
+                <td style="padding:.75rem;"><a href="/panel/owner/ip-manager/unblock/${encodeURIComponent(b.ip)}" class="btn btn-sm btn-outline" onclick="return confirm('Débloquer?')">✅ Débloquer</a></td>
+            </tr>`;
+        }).join('') + '</tbody></table></div>'}
     </div>
-    ${isXywez ? `
-    <div class="card">
-        <h3 style="color:#22c55e;margin-bottom:1.5rem;">✅ Whitelister une IP</h3>
-        <form action="/panel/owner/ip-manager/whitelist" method="POST">
-            <div class="form-group"><label class="form-label">Adresse IP</label>
-                <input type="text" name="ip" class="form-control" placeholder="1.2.3.4" required></div>
-            <div class="form-group"><label class="form-label">Note</label>
-                <input type="text" name="note" class="form-control" placeholder="IP de confiance"></div>
-            <button type="submit" class="btn" style="background:#22c55e;color:#000;font-weight:900;width:100%">✅ Whitelister</button>
-        </form>
-    </div>` : '<div class="card"><p style="color:var(--text-muted)">Seul Xywez peut gérer la whitelist.</p></div>'}
-    </div>
-    
-    <div class="card" style="margin-top:1.5rem;">
-        <h3 style="color:#ef4444;margin-bottom:1rem;">🚫 IPs Bloquées (${enrichedBlocked.length})</h3>
-        <div style="overflow-x:auto;">
-        <table class="table"><thead><tr><th>IP</th><th>Géolocalisation</th><th>Raison</th><th>Par</th><th>Date</th><th>Action</th></tr></thead>
-        <tbody>${enrichedBlocked.length===0?'<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">Aucune IP bloquée</td></tr>':
-        enrichedBlocked.map(b=>`<tr>
-            <td><code style="color:#ef4444">${b.ip}</code></td>
-            <td>${b.geo?`${b.geo.emoji} ${b.geo.city}, ${b.geo.country}`:'?'}</td>
-            <td>${b.reason||'N/A'}</td>
-            <td>${b.blockedBy||'panel'}</td>
-            <td>${b.date?new Date(b.date).toLocaleDateString('fr-FR'):'-'}</td>
-            <td><a href="/panel/owner/ip-manager/unblock/${encodeURIComponent(b.ip)}" class="btn btn-sm" style="background:#22c55e20;color:#22c55e" onclick="return confirm('Débloquer cette IP ?')">✅ Débloquer</a></td>
-        </tr>`).join('')}
-        </tbody></table></div>
-    </div>
-    
-    ${isXywez ? `
-    <div class="card" style="margin-top:1.5rem;">
-        <h3 style="color:#22c55e;margin-bottom:1rem;">✅ IPs Whitelistées (${enrichedWhite.length})</h3>
-        <div style="overflow-x:auto;">
-        <table class="table"><thead><tr><th>IP</th><th>Géolocalisation</th><th>Note</th><th>Par</th><th>Action</th></tr></thead>
-        <tbody>${enrichedWhite.length===0?'<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Aucune IP whitelistée</td></tr>':
-        enrichedWhite.map(w=>`<tr>
-            <td><code style="color:#22c55e">${w.ip}</code></td>
-            <td>${w.geo?`${w.geo.emoji} ${w.geo.city}, ${w.geo.country}`:'?'}</td>
-            <td>${w.note||'-'}</td>
-            <td>${w.addedBy||'xywez'}</td>
-            <td><a href="/panel/owner/ip-manager/remove-whitelist/${encodeURIComponent(w.ip)}" class="btn btn-sm" style="background:#ef444420;color:#ef4444" onclick="return confirm('Retirer de la whitelist ?')">🗑️ Retirer</a></td>
-        </tr>`).join('')}
-        </tbody></table></div>
-    </div>` : ''}
-    `;
-    res.send(panelLayout(user, 'Gestionnaire IP', content, 'owner'));
+    ${isXywez && whitelisted.length > 0 ? `<div class="card">
+        <h3 style="margin-bottom:1rem;">✅ IPs Whitelistées (${whitelisted.length})</h3>
+        <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">
+            <thead><tr style="border-bottom:2px solid var(--border);"><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">IP</th><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">NOTE</th><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">PAR</th><th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.8rem;">ACTION</th></tr></thead>
+            <tbody>${whitelisted.map(w => `<tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:.75rem;font-family:monospace;font-size:.85rem;">${w.ip}</td>
+                <td style="padding:.75rem;color:var(--text-muted);font-size:.85rem;">${w.note||'-'}</td>
+                <td style="padding:.75rem;font-size:.85rem;">${w.addedBy||'-'}</td>
+                <td style="padding:.75rem;"><a href="/panel/owner/ip-manager/remove-whitelist/${encodeURIComponent(w.ip)}" class="btn btn-sm btn-danger" onclick="return confirm('Retirer?')">🗑️</a></td>
+            </tr>`).join('')}</tbody>
+        </table></div>
+    </div>` : ''}`;
+    res.send(panelLayout(req.session.user, 'Gestionnaire IP', content, 'ip-manager'));
 });
 
 app.post('/panel/owner/ip-manager/block', isAuthenticated, hasRole('owner'), (req, res) => {
     const { ip, reason } = req.body;
-    const user = req.session.user;
-    if (!ip) return res.redirect('/panel/owner/ip-manager?error=' + encodeURIComponent('IP manquante'));
+    if (!ip) return res.redirect('/panel/owner/ip-manager?error=IP+manquante');
     const db = readDB();
     if (!db.blockedIPs) db.blockedIPs = [];
-    if (db.blockedIPs.find(b => b.ip === ip)) return res.redirect('/panel/owner/ip-manager?error=' + encodeURIComponent('IP déjà bloquée'));
-    db.blockedIPs.push({ ip, reason: reason||'Bloqué par panel', blockedBy: user.username, date: new Date().toISOString() });
+    if (!db.blockedIPs.find(b => b.ip === ip)) {
+        db.blockedIPs.push({ ip, reason: reason||'', blockedBy: req.session.user.username, date: new Date().toISOString(), geo: null });
+        addLog('BLOCK_IP', req.session.user.username, ip, { reason }, getClientIP(req));
+    }
     writeDB(db);
-    addLog('🚫 IP Bloquée', user.username, ip, { reason }, getClientIP(req), getClientInfo(req));
-    res.redirect('/panel/owner/ip-manager?success=' + encodeURIComponent(`IP ${ip} bloquée`));
-});
-
-app.get('/panel/owner/ip-manager/unblock/:ip', isAuthenticated, hasRole('owner'), (req, res) => {
-    const ip = decodeURIComponent(req.params.ip);
-    const db = readDB();
-    db.blockedIPs = (db.blockedIPs||[]).filter(b => b.ip !== ip);
-    writeDB(db);
-    addLog('✅ IP Débloquée', req.session.user.username, ip, {}, getClientIP(req), getClientInfo(req));
-    res.redirect('/panel/owner/ip-manager?success=' + encodeURIComponent(`IP ${ip} débloquée`));
+    res.redirect('/panel/owner/ip-manager?success=1');
 });
 
 app.post('/panel/owner/ip-manager/whitelist', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez.'));
+    const isXywez = req.session.user.discordId === SUPER_ADMIN_DISCORD_ID || req.session.user.username === 'xywez';
+    if (!isXywez) return res.status(403).send('Réservé à Xywez');
     const { ip, note } = req.body;
-    if (!ip) return res.redirect('/panel/owner/ip-manager?error=' + encodeURIComponent('IP manquante'));
     const db = readDB();
     if (!db.whitelistedIPs) db.whitelistedIPs = [];
-    if (db.whitelistedIPs.find(w => w.ip === ip)) return res.redirect('/panel/owner/ip-manager?error=' + encodeURIComponent('IP déjà whitelistée'));
-    db.whitelistedIPs.push({ ip, note: note||'', addedBy: user.username, date: new Date().toISOString() });
+    if (!db.whitelistedIPs.find(w => w.ip === ip)) {
+        db.whitelistedIPs.push({ ip, note: note||'', addedBy: req.session.user.username, date: new Date().toISOString() });
+        addLog('WHITELIST_IP', req.session.user.username, ip, { note }, getClientIP(req));
+    }
     writeDB(db);
-    addLog('✅ IP Whitelistée', user.username, ip, { note }, getClientIP(req), getClientInfo(req));
-    res.redirect('/panel/owner/ip-manager?success=' + encodeURIComponent(`IP ${ip} whitelistée`));
+    res.redirect('/panel/owner/ip-manager?success=1');
+});
+
+app.get('/panel/owner/ip-manager/unblock/:ip', isAuthenticated, hasRole('owner'), (req, res) => {
+    const db = readDB();
+    db.blockedIPs = (db.blockedIPs||[]).filter(b => b.ip !== decodeURIComponent(req.params.ip));
+    writeDB(db);
+    res.redirect('/panel/owner/ip-manager');
 });
 
 app.get('/panel/owner/ip-manager/remove-whitelist/:ip', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.redirect('/panel/owner/ip-manager?error=' + encodeURIComponent('Réservé à Xywez'));
-    const ip = decodeURIComponent(req.params.ip);
+    const isXywez = req.session.user.discordId === SUPER_ADMIN_DISCORD_ID || req.session.user.username === 'xywez';
+    if (!isXywez) return res.status(403).send('Réservé à Xywez');
     const db = readDB();
-    db.whitelistedIPs = (db.whitelistedIPs||[]).filter(w => w.ip !== ip);
+    db.whitelistedIPs = (db.whitelistedIPs||[]).filter(w => w.ip !== decodeURIComponent(req.params.ip));
     writeDB(db);
-    addLog('🗑️ IP retirée whitelist', user.username, ip, {}, getClientIP(req), getClientInfo(req));
-    res.redirect('/panel/owner/ip-manager?success=' + encodeURIComponent(`IP ${ip} retirée de la whitelist`));
+    res.redirect('/panel/owner/ip-manager');
 });
 
+// ── Logs Géo-IP ──────────────────────────────────────────
+app.get('/panel/logs-geo', isAuthenticated, hasRole('moderateur'), async (req, res) => {
+    const db = readDB();
+    const logs = (db.logs || []).slice(0, 200);
+    const content = `
+    <div class="page-header">
+        <div><div class="page-title">🌍 Logs <span>Géo-IP</span></div>
+        <div class="page-breadcrumb">${logs.length} entrées — IP + localisation + appareil</div></div>
+    </div>
+    <div class="card" style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;min-width:700px;">
+            <thead><tr style="border-bottom:2px solid var(--border);">
+                <th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.75rem;white-space:nowrap;">DATE</th>
+                <th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.75rem;">ACTION</th>
+                <th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.75rem;">UTILISATEUR</th>
+                <th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.75rem;">IP</th>
+                <th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.75rem;">GÉO</th>
+                <th style="padding:.75rem;text-align:left;color:var(--text-muted);font-size:.75rem;">APPAREIL</th>
+            </tr></thead>
+            <tbody>
+                ${logs.map(l => {
+                    const g = l.geo || {};
+                    const vpnBadge = g.vpn ? '<span style="background:#ef444430;color:#ef4444;border-radius:4px;padding:1px 5px;font-size:.65rem;margin-left:4px;">VPN</span>' : '';
+                    const geoStr = g.country ? `${g.emoji||'🌍'} ${g.city||'?'}, ${g.country}${vpnBadge}` : '<span style="color:var(--text-muted);font-size:.8rem;">En attente...</span>';
+                    return `<tr style="border-bottom:1px solid var(--border);">
+                        <td style="padding:.65rem;font-size:.75rem;color:var(--text-muted);white-space:nowrap;">${new Date(l.timestamp).toLocaleString('fr-FR')}</td>
+                        <td style="padding:.65rem;font-size:.8rem;"><span style="background:rgba(147,51,234,.2);color:#c084fc;border-radius:4px;padding:2px 8px;">${l.action||'?'}</span></td>
+                        <td style="padding:.65rem;font-size:.85rem;font-weight:600;">${l.executor||'?'}</td>
+                        <td style="padding:.65rem;font-family:monospace;font-size:.8rem;">${l.ip||'-'}</td>
+                        <td style="padding:.65rem;font-size:.85rem;">${geoStr}</td>
+                        <td style="padding:.65rem;font-size:.75rem;color:var(--text-muted);">${l.device||''} ${l.browser||''} ${l.os||''}</td>
+                    </tr>`;
+                }).join('')}
+            </tbody>
+        </table>
+    </div>`;
+    res.send(panelLayout(req.session.user, 'Logs Géo-IP', content, 'logs-geo'));
+});
 
-// ============================================================
-// ===     PAGE PUBLIQUE TACTIQUE (LIVE DB)                ===
-// ============================================================
-app.get('/tactique', (req, res) => {
+// ── Public Settings ───────────────────────────────────────
+app.get('/panel/owner/public-settings', isAuthenticated, hasRole('owner'), (req, res) => {
     const db = readDB();
     const ps = getPublicSettings(db);
-    const tactic = (db.serverConfig && db.serverConfig.tactic) || { formation: '4-3-3', style: 'Possession Offensive', mentality: 'Attaque', instructions: [], players: [] };
-    const members = (db.teamMembers || db.users.filter(u => u.role === 'joueur' || u.role === 'capitaine' || u.accountType === 'joueur'));
-    
-    const formationPositions = {
-        '4-3-3': [
-            {pos:'GK',label:'Gardien',x:50,y:88},{pos:'LB',label:'Latéral G',x:15,y:70},{pos:'CB',label:'Défenseur C',x:35,y:70},{pos:'CB',label:'Défenseur C',x:65,y:70},{pos:'RB',label:'Latéral D',x:85,y:70},
-            {pos:'CM',label:'Milieu C',x:25,y:50},{pos:'CM',label:'Milieu C',x:50,y:50},{pos:'CM',label:'Milieu C',x:75,y:50},
-            {pos:'LW',label:'Ailier G',x:15,y:25},{pos:'ST',label:'Attaquant',x:50,y:15},{pos:'RW',label:'Ailier D',x:85,y:25}
-        ],
-        '4-4-2': [
-            {pos:'GK',label:'Gardien',x:50,y:88},{pos:'LB',label:'Latéral G',x:15,y:70},{pos:'CB',label:'Défenseur C',x:35,y:70},{pos:'CB',label:'Défenseur C',x:65,y:70},{pos:'RB',label:'Latéral D',x:85,y:70},
-            {pos:'LM',label:'Milieu G',x:15,y:50},{pos:'CM',label:'Milieu C',x:37,y:50},{pos:'CM',label:'Milieu C',x:63,y:50},{pos:'RM',label:'Milieu D',x:85,y:50},
-            {pos:'ST',label:'Attaquant',x:35,y:18},{pos:'ST',label:'Attaquant',x:65,y:18}
-        ],
-        '4-2-3-1': [
-            {pos:'GK',label:'Gardien',x:50,y:88},{pos:'LB',label:'Latéral G',x:15,y:70},{pos:'CB',label:'Défenseur C',x:35,y:70},{pos:'CB',label:'Défenseur C',x:65,y:70},{pos:'RB',label:'Latéral D',x:85,y:70},
-            {pos:'CDM',label:'Défensif C',x:37,y:57},{pos:'CDM',label:'Défensif C',x:63,y:57},
-            {pos:'LW',label:'Ailier G',x:15,y:38},{pos:'CAM',label:'Meneur',x:50,y:35},{pos:'RW',label:'Ailier D',x:85,y:38},
-            {pos:'ST',label:'Attaquant',x:50,y:15}
-        ],
-        '3-5-2': [
-            {pos:'GK',label:'Gardien',x:50,y:88},{pos:'CB',label:'Défenseur G',x:25,y:72},{pos:'CB',label:'Défenseur C',x:50,y:72},{pos:'CB',label:'Défenseur D',x:75,y:72},
-            {pos:'LWB',label:'Piston G',x:10,y:55},{pos:'CM',label:'Milieu G',x:30,y:50},{pos:'CM',label:'Milieu C',x:50,y:50},{pos:'CM',label:'Milieu D',x:70,y:50},{pos:'RWB',label:'Piston D',x:90,y:55},
-            {pos:'ST',label:'Attaquant G',x:35,y:18},{pos:'ST',label:'Attaquant D',x:65,y:18}
-        ],
-        '5-3-2': [
-            {pos:'GK',label:'Gardien',x:50,y:88},{pos:'LWB',label:'Piston G',x:10,y:70},{pos:'CB',label:'Défenseur',x:27,y:73},{pos:'CB',label:'Défenseur C',x:50,y:73},{pos:'CB',label:'Défenseur',x:73,y:73},{pos:'RWB',label:'Piston D',x:90,y:70},
-            {pos:'CM',label:'Milieu G',x:25,y:50},{pos:'CM',label:'Milieu C',x:50,y:50},{pos:'CM',label:'Milieu D',x:75,y:50},
-            {pos:'ST',label:'Attaquant G',x:35,y:18},{pos:'ST',label:'Attaquant D',x:65,y:18}
-        ]
-    };
-    
-    const positions = formationPositions[tactic.formation] || formationPositions['4-3-3'];
-    const playerAssignments = tactic.players || {};
-    
-    const captain = db.users.find(u => u.role === 'capitaine' || u.accountType === 'capitaine');
-    
-    res.send(publicLayout('Notre Tactique', `
-    <section class="section" style="padding-top:7rem;">
-    <div class="container">
-        <div class="section-header">
-            <div class="display-1" style="font-size:clamp(2rem,6vw,4rem);">🎯 NOTRE TACTIQUE</div>
-            <p class="section-subtitle">Formation officielle ${tactic.formation} – mise à jour en temps réel</p>
-        </div>
-        
-        ${captain ? `<div style="text-align:center;margin-bottom:2rem;"><span style="background:rgba(147,51,234,.2);border:1px solid #9333ea;padding:.5rem 1.5rem;border-radius:50px;color:#9333ea;font-weight:700;">🎯 Capitaine: ${captain.username}</span></div>` : ''}
-        
-        <div style="display:grid;grid-template-columns:1fr 320px;gap:2rem;align-items:start;">
-        <!-- Terrain -->
-        <div style="background:linear-gradient(180deg,#0a2a0a 0%,#0d3d0d 50%,#0a2a0a 100%);border-radius:16px;border:2px solid rgba(147,51,234,.4);position:relative;aspect-ratio:2/3;min-height:500px;overflow:hidden;box-shadow:0 0 60px rgba(147,51,234,.3);">
-            <!-- Lignes terrain -->
-            <div style="position:absolute;inset:5%;border:2px solid rgba(255,255,255,.25);border-radius:4px;"></div>
-            <div style="position:absolute;top:5%;left:25%;right:25%;height:18%;border:2px solid rgba(255,255,255,.2);border-top:none;"></div>
-            <div style="position:absolute;bottom:5%;left:25%;right:25%;height:18%;border:2px solid rgba(255,255,255,.2);border-bottom:none;"></div>
-            <div style="position:absolute;top:50%;left:5%;right:5%;height:2px;background:rgba(255,255,255,.2);transform:translateY(-50%);"></div>
-            <div style="position:absolute;top:50%;left:50%;width:80px;height:80px;border:2px solid rgba(255,255,255,.2);border-radius:50%;transform:translate(-50%,-50%);"></div>
-            ${positions.map((p, i) => {
-                const assignment = playerAssignments[p.pos+'_'+i] || playerAssignments[p.pos] || null;
-                return `<div style="position:absolute;left:${p.x}%;top:${p.y}%;transform:translate(-50%,-50%);text-align:center;z-index:10;">
-                    <div style="width:44px;height:44px;background:linear-gradient(135deg,#9333ea,#ec4899);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.1rem;font-weight:900;color:#fff;margin:0 auto;border:2px solid #fff;box-shadow:0 0 20px rgba(147,51,234,.8);cursor:pointer;" title="${p.label}">
-                        ${assignment ? assignment[0].toUpperCase() : p.pos.slice(0,2)}
-                    </div>
-                    <div style="font-size:.6rem;color:rgba(255,255,255,.9);font-weight:700;margin-top:2px;white-space:nowrap;text-shadow:0 1px 4px #000;">${assignment || p.label}</div>
-                </div>`;
-            }).join('')}
-        </div>
-        
-        <!-- Info Tactique -->
-        <div style="display:flex;flex-direction:column;gap:1rem;">
-            <div class="card">
-                <div style="font-size:.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;">Formation</div>
-                <div style="font-size:2.5rem;font-weight:900;color:#9333ea;">${tactic.formation}</div>
-            </div>
-            <div class="card">
-                <div style="font-size:.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.5rem;">Style de Jeu</div>
-                <div style="font-weight:700;color:var(--text-primary);">${tactic.style||'Possession Offensive'}</div>
-            </div>
-            <div class="card">
-                <div style="font-size:.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.5rem;">Mentalité</div>
-                <div style="font-weight:700;color:#ec4899;">${tactic.mentality||'Attaque'}</div>
-            </div>
-            ${(tactic.instructions && tactic.instructions.length > 0) ? `
-            <div class="card">
-                <div style="font-size:.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.75rem;">⚡ Instructions</div>
-                ${tactic.instructions.map(i => `<div style="padding:.4rem .75rem;background:rgba(147,51,234,.15);border-left:3px solid #9333ea;border-radius:4px;margin-bottom:.5rem;font-size:.9rem;color:var(--text-secondary);">${i}</div>`).join('')}
-            </div>` : ''}
-        </div>
-        </div>
+    const content = `
+    <div class="page-header">
+        <div><div class="page-title">🎨 Personnalisation <span>Site Public</span></div>
+        <div class="page-breadcrumb">Apparence et contenu des pages publiques</div></div>
     </div>
-    </section>
-    `, 'dark', db));
+    <form action="/panel/owner/public-settings" method="POST">
+        <div class="grid-2" style="gap:1.5rem;">
+            <div class="card">
+                <h3 style="margin-bottom:1.5rem;">🏠 Page d'accueil</h3>
+                <div class="form-group">
+                    <label class="form-label">Titre principal</label>
+                    <input type="text" name="heroTitle" value="${ps.heroTitle||'FTY CLUB PRO'}" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Sous-titre</label>
+                    <input type="text" name="heroSubtitle" value="${ps.heroSubtitle||''}" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Lien Discord</label>
+                    <input type="text" name="discordInvite" value="${ps.discordInvite||''}" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Footer personnalisé</label>
+                    <input type="text" name="customFooter" value="${ps.customFooter||''}" class="form-control">
+                </div>
+            </div>
+            <div class="card">
+                <h3 style="margin-bottom:1.5rem;">🎨 Couleurs</h3>
+                <div class="form-group">
+                    <label class="form-label">Couleur principale</label>
+                    <div style="display:flex;gap:.75rem;align-items:center;">
+                        <input type="color" name="primaryColor" value="${ps.primaryColor||'#9333ea'}" style="width:48px;height:48px;border:none;background:none;cursor:pointer;">
+                        <input type="text" name="primaryColorText" value="${ps.primaryColor||'#9333ea'}" class="form-control" style="font-family:monospace;" readonly>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Couleur accent</label>
+                    <div style="display:flex;gap:.75rem;align-items:center;">
+                        <input type="color" name="accentColor" value="${ps.accentColor||'#ec4899'}" style="width:48px;height:48px;border:none;background:none;cursor:pointer;">
+                        <input type="text" name="accentColorText" value="${ps.accentColor||'#ec4899'}" class="form-control" style="font-family:monospace;" readonly>
+                    </div>
+                </div>
+                <h3 style="margin:1.5rem 0 1rem;">📌 Sections visibles</h3>
+                <div style="display:flex;flex-direction:column;gap:.75rem;">
+                    ${[['showStats','📊 Statistiques'],['showMatchs','⚽ Matchs'],['showTactique','🎯 Tactique'],['showEquipe','👥 Équipe'],['chatbotEnabled','🤖 Chatbot'],['guideEnabled','📖 Guide']].map(([k,l]) =>
+                        `<label style="display:flex;align-items:center;gap:.75rem;cursor:pointer;"><input type="checkbox" name="${k}" ${ps[k]?'checked':''} style="width:18px;height:18px;accent-color:var(--primary);"> ${l}</label>`
+                    ).join('')}
+                </div>
+            </div>
+        </div>
+        <div class="card" style="margin-top:1.5rem;">
+            <h3 style="margin-bottom:1rem;">📢 Bannière d'annonce</h3>
+            <div class="form-group">
+                <label class="form-label">Texte de la bannière</label>
+                <input type="text" name="announcementBanner" value="${ps.announcementBanner||''}" class="form-control" placeholder="Ex: Match ce soir à 20h !">
+            </div>
+            <label style="display:flex;align-items:center;gap:.75rem;cursor:pointer;">
+                <input type="checkbox" name="announcementActive" ${ps.announcementActive?'checked':''} style="width:18px;height:18px;accent-color:var(--primary);">
+                <span>Activer la bannière</span>
+            </label>
+        </div>
+        <div style="margin-top:1.5rem;">
+            <button type="submit" class="btn btn-primary btn-full" style="font-size:1.1rem;padding:1.25rem;">💾 Sauvegarder toutes les modifications</button>
+        </div>
+    </form>`;
+    res.send(panelLayout(req.session.user, 'Personnalisation', content, 'public-settings'));
 });
 
+app.post('/panel/owner/public-settings', isAuthenticated, hasRole('owner'), (req, res) => {
+    const db = readDB();
+    if (!db.publicSettings) db.publicSettings = {};
+    const b = req.body;
+    db.publicSettings.heroTitle = b.heroTitle || 'FTY CLUB PRO';
+    db.publicSettings.heroSubtitle = b.heroSubtitle || '';
+    db.publicSettings.discordInvite = b.discordInvite || '';
+    db.publicSettings.customFooter = b.customFooter || '';
+    db.publicSettings.primaryColor = b.primaryColor || '#9333ea';
+    db.publicSettings.accentColor = b.accentColor || '#ec4899';
+    db.publicSettings.showStats = !!b.showStats;
+    db.publicSettings.showMatchs = !!b.showMatchs;
+    db.publicSettings.showTactique = !!b.showTactique;
+    db.publicSettings.showEquipe = !!b.showEquipe;
+    db.publicSettings.chatbotEnabled = !!b.chatbotEnabled;
+    db.publicSettings.guideEnabled = !!b.guideEnabled;
+    db.publicSettings.announcementBanner = b.announcementBanner || '';
+    db.publicSettings.announcementActive = !!b.announcementActive;
+    writeDB(db);
+    res.redirect('/panel/owner/public-settings?success=1');
+});
 
-// ============================================================
-// ===         NOUVELLES PAGES PUBLIQUES                   ===
-// ============================================================
+// ── Chatbot API ───────────────────────────────────────────
+const CHATBOT_RESPONSES = [
+    { keys: ['rejoindre','join','comment','intégrer','entrer'], reply: '🎯 Pour rejoindre FTY Club Pro, remplis le formulaire de candidature sur <a href="/candidature" style="color:#c084fc;">cette page</a> !' },
+    { keys: ['discord','serveur','lien'], reply: '💬 Rejoins notre serveur Discord ! Lien disponible en haut de la page d\'accueil.' },
+    { keys: ['tactique','formation','compo'], reply: '⚽ Tu peux voir notre tactique en direct sur la page <a href="/tactique" style="color:#c084fc;">/tactique</a> !' },
+    { keys: ['match','prochain','calendrier'], reply: '📅 Retrouve tous nos matchs sur la page <a href="/#matchs" style="color:#c084fc;">Matchs</a> de l\'accueil.' },
+    { keys: ['recrutement','recrute','poste','joueur'], reply: '🎯 Nous recrutons ! Voir les postes ouverts sur <a href="/recrutement" style="color:#c084fc;">/recrutement</a>.' },
+    { keys: ['guide','règles','règlement'], reply: '📖 Consulte notre guide complet sur <a href="/guide" style="color:#c084fc;">/guide</a>.' },
+    { keys: ['palmares','victoire','résultat','titre'], reply: '🏆 Retrouve tous nos résultats sur <a href="/palmares" style="color:#c084fc;">/palmares</a>.' },
+    { keys: ['contact','mail','email'], reply: '📧 Contacte-nous via Discord ou le formulaire de candidature.' },
+    { keys: ['bonjour','salut','hello','yo'], reply: '👋 Salut ! Comment puis-je t\'aider ? Rejoindre l\'équipe, infos sur les matchs, recrutement ?' },
+    { keys: ['merci','thanks'], reply: '😊 De rien ! N\'hésite pas si tu as d\'autres questions.' },
+];
 
-// PAGE GUIDE
+app.post('/api/chatbot', async (req, res) => {
+    await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+    const msg = (req.body.message || '').toLowerCase().trim();
+    if (!msg) return res.json({ reply: '❓ Tu n\'as rien écrit !' });
+    for (const r of CHATBOT_RESPONSES) {
+        if (r.keys.some(k => msg.includes(k))) return res.json({ reply: r.reply });
+    }
+    res.json({ reply: '🤖 Je n\'ai pas compris. Tu peux me demander : comment rejoindre, les matchs, la tactique, le recrutement, ou le guide !' });
+});
+
+// ── New Public Pages ──────────────────────────────────────
 app.get('/guide', (req, res) => {
     const db = readDB();
     const ps = getPublicSettings(db);
-    if (!ps.guideEnabled) return res.redirect('/');
-    
-    res.send(publicLayout('Guide', `
-    <section class="section" style="padding-top:7rem;">
-    <div class="container">
-        <div class="section-header">
-            <div class="display-1" style="font-size:clamp(2rem,6vw,4rem);">📖 GUIDE FTY</div>
-            <p class="section-subtitle">Tout ce que tu dois savoir pour rejoindre FTY Club Pro</p>
-        </div>
-        
-        <div class="grid-2" style="gap:2rem;">
-            <div class="card">
-                <div style="font-size:2.5rem;margin-bottom:1rem;">⚽</div>
-                <h3 style="color:#9333ea;margin-bottom:1rem;">Comment rejoindre FTY ?</h3>
-                <ol style="padding-left:1.5rem;line-height:2;color:var(--text-secondary);">
-                    <li>Remplis le formulaire de candidature sur notre site</li>
-                    <li>Précise ton jeu, ton rang et ta disponibilité</li>
-                    <li>Attends la réponse du staff (sous 48h)</li>
-                    <li>Passe les tests d'intégration si accepté</li>
-                    <li>Rejoins notre serveur Discord officiel</li>
-                </ol>
+    const content = `
+    <section style="padding:6rem 0 4rem;">
+        <div class="container">
+            <h1 class="display-1" style="text-align:center;font-size:clamp(2rem,6vw,4rem);margin-bottom:1rem;">📖 GUIDE FTY</h1>
+            <p style="text-align:center;color:var(--text-muted);font-size:1.1rem;margin-bottom:3rem;">Tout ce que tu dois savoir pour rejoindre et évoluer</p>
+            <div class="grid-2" style="gap:2rem;">
+                <div class="card"><h3 style="color:var(--primary);margin-bottom:1rem;">🎯 Comment rejoindre</h3>
+                    <ol style="padding-left:1.5rem;color:var(--text-secondary);line-height:2.2;">
+                        <li>Remplis le formulaire de candidature</li>
+                        <li>Attends la validation du staff</li>
+                        <li>Rejoint le serveur Discord</li>
+                        <li>Présente-toi dans #général</li>
+                        <li>Participe à ton premier match !</li>
+                    </ol>
+                </div>
+                <div class="card"><h3 style="color:var(--secondary);margin-bottom:1rem;">📋 Règlement</h3>
+                    <ul style="padding-left:1.5rem;color:var(--text-secondary);line-height:2.2;">
+                        <li>Respect envers tous les membres</li>
+                        <li>Présence obligatoire aux matchs prévus</li>
+                        <li>Communication via Discord</li>
+                        <li>Fair-play en compétition</li>
+                        <li>Signaler toute absence au staff</li>
+                    </ul>
+                </div>
+                <div class="card"><h3 style="color:var(--accent);margin-bottom:1rem;">🎮 Jeux & Plateformes</h3>
+                    <p style="color:var(--text-secondary);">FTY Club Pro est actif sur :</p>
+                    <div style="display:flex;flex-wrap:wrap;gap:.75rem;margin-top:1rem;">
+                        ${['⚽ EA FC', '🎮 FIFA', '🏆 eLiga', '🌐 PC', '🎮 Console'].map(g => `<span style="background:rgba(147,51,234,.2);color:#c084fc;border:1px solid rgba(147,51,234,.4);border-radius:20px;padding:.4rem 1rem;font-size:.9rem;">${g}</span>`).join('')}
+                    </div>
+                </div>
+                <div class="card"><h3 style="color:#10b981;margin-bottom:1rem;">✨ Avantages membre</h3>
+                    <ul style="padding-left:1.5rem;color:var(--text-secondary);line-height:2.2;">
+                        <li>Accès au panel membre</li>
+                        <li>Coaching et stratégie</li>
+                        <li>Tournois internes</li>
+                        <li>Communauté active</li>
+                        <li>Évolution de rang possible</li>
+                    </ul>
+                </div>
             </div>
-            <div class="card">
-                <div style="font-size:2.5rem;margin-bottom:1rem;">🎮</div>
-                <h3 style="color:#ec4899;margin-bottom:1rem;">Nos Jeux</h3>
-                <ul style="padding-left:1.5rem;line-height:2;color:var(--text-secondary);">
-                    <li>FC 25 (eFootball)</li>
-                    <li>FIFA Online</li>
-                    <li>Matchs Amicaux</li>
-                    <li>Tournois internes</li>
-                </ul>
-            </div>
-            <div class="card">
-                <div style="font-size:2.5rem;margin-bottom:1rem;">📋</div>
-                <h3 style="color:#f59e0b;margin-bottom:1rem;">Règles Importantes</h3>
-                <ul style="padding-left:1.5rem;line-height:2;color:var(--text-secondary);">
-                    <li>Respect envers tous les membres</li>
-                    <li>Présence aux matchs obligatoire</li>
-                    <li>Prévenir en cas d'absence</li>
-                    <li>Bonne ambiance et esprit d'équipe</li>
-                    <li>Zéro toxicité</li>
-                </ul>
-            </div>
-            <div class="card">
-                <div style="font-size:2.5rem;margin-bottom:1rem;">🏆</div>
-                <h3 style="color:#22c55e;margin-bottom:1rem;">Avantages Membres</h3>
-                <ul style="padding-left:1.5rem;line-height:2;color:var(--text-secondary);">
-                    <li>Accès au panel membre</li>
-                    <li>Participation aux tournois</li>
-                    <li>Discord privé staff</li>
-                    <li>Coaching et formation</li>
-                    <li>Rôles et grades évoluttifs</li>
-                </ul>
+            <div style="text-align:center;margin-top:3rem;">
+                <a href="/candidature" class="btn btn-primary" style="font-size:1.1rem;padding:1rem 3rem;">🚀 Postuler maintenant</a>
             </div>
         </div>
-        
-        <div class="card" style="margin-top:2rem;text-align:center;background:linear-gradient(135deg,rgba(147,51,234,.2),rgba(236,72,153,.1));border-color:#9333ea;">
-            <h3 style="font-size:2rem;margin-bottom:1rem;">Prêt à rejoindre ?</h3>
-            <p style="color:var(--text-secondary);margin-bottom:2rem;">Dépose ta candidature maintenant et intègre l'une des meilleures teams !</p>
-            <a href="/candidature" class="btn btn-primary">🚀 Candidater Maintenant</a>
-        </div>
-    </div>
-    </section>
-    `, 'dark', db));
+    </section>`;
+    res.send(publicLayoutV3(ps, 'Guide', content));
 });
 
-// PAGE PALMARES
 app.get('/palmares', (req, res) => {
     const db = readDB();
-    const stats = db.stats || { wins: 0, draws: 0, losses: 0, goals: 0, goalsAgainst: 0 };
-    const matches = (db.matches || []).filter(m => m.status === 'played' || m.score);
-    
-    res.send(publicLayout('Palmarès', `
-    <section class="section" style="padding-top:7rem;">
-    <div class="container">
-        <div class="section-header">
-            <div class="display-1" style="font-size:clamp(2rem,6vw,4rem);">🏆 PALMARÈS</div>
-            <p class="section-subtitle">Tous les résultats et performances de FTY Club Pro</p>
-        </div>
-        
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-bottom:3rem;">
-            <div class="card" style="text-align:center;border-color:#22c55e;">
-                <div style="font-size:3.5rem;font-weight:900;color:#22c55e;">${stats.wins||0}</div>
-                <div style="color:var(--text-secondary);font-weight:700;margin-top:.5rem;">✅ Victoires</div>
+    const ps = getPublicSettings(db);
+    const stats = db.stats || DEFAULT_STATS;
+    const matches = (db.matches || []).filter(m => m.status === 'finished').slice(0, 10);
+    const content = `
+    <section style="padding:6rem 0 4rem;">
+        <div class="container">
+            <h1 class="display-1" style="text-align:center;font-size:clamp(2rem,6vw,4rem);margin-bottom:1rem;">🏆 PALMARÈS</h1>
+            <p style="text-align:center;color:var(--text-muted);font-size:1.1rem;margin-bottom:3rem;">Nos résultats et statistiques</p>
+            <div class="grid-4" style="margin-bottom:3rem;">
+                ${[['⚽',stats.wins||0,'Victoires','#10b981'],['🤝',stats.draws||0,'Nuls','#f59e0b'],['😤',stats.losses||0,'Défaites','#ef4444'],['🎯',stats.goals||0,'Buts','#9333ea']].map(([ico,val,lab,col]) => `
+                <div class="card" style="text-align:center;border-color:${col}40;">
+                    <div style="font-size:2.5rem;margin-bottom:.5rem;">${ico}</div>
+                    <div style="font-size:3rem;font-weight:900;color:${col};font-family:var(--font-display);">${val}</div>
+                    <div style="color:var(--text-muted);">${lab}</div>
+                </div>`).join('')}
             </div>
-            <div class="card" style="text-align:center;border-color:#f59e0b;">
-                <div style="font-size:3.5rem;font-weight:900;color:#f59e0b;">${stats.draws||0}</div>
-                <div style="color:var(--text-secondary);font-weight:700;margin-top:.5rem;">🟡 Nuls</div>
-            </div>
-            <div class="card" style="text-align:center;border-color:#ef4444;">
-                <div style="font-size:3.5rem;font-weight:900;color:#ef4444;">${stats.losses||0}</div>
-                <div style="color:var(--text-secondary);font-weight:700;margin-top:.5rem;">❌ Défaites</div>
-            </div>
-        </div>
-        
-        <div class="grid-2" style="margin-bottom:3rem;">
-            <div class="card" style="text-align:center;">
-                <div style="font-size:2.5rem;font-weight:900;color:#9333ea;">${stats.goals||0}</div>
-                <div style="color:var(--text-secondary);">⚽ Buts marqués</div>
-            </div>
-            <div class="card" style="text-align:center;">
-                <div style="font-size:2.5rem;font-weight:900;color:#ec4899;">${stats.goalsAgainst||0}</div>
-                <div style="color:var(--text-secondary);">🔴 Buts encaissés</div>
+            <div class="card">
+                <h3 style="margin-bottom:1.5rem;">📅 Derniers Résultats</h3>
+                ${matches.length === 0 ? '<p style="color:var(--text-muted);text-align:center;padding:2rem;">Aucun résultat enregistré.</p>' :
+                '<div style="display:flex;flex-direction:column;gap:.75rem;">' + matches.map(m => {
+                    const scores = (m.score||'?-?').split('-');
+                    const ftyScore = parseInt(scores[0]||0);
+                    const advScore = parseInt(scores[1]||0);
+                    const won = ftyScore > advScore;
+                    const col = won ? '#10b981' : ftyScore < advScore ? '#ef4444' : '#f59e0b';
+                    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:1rem;background:var(--bg-tertiary);border-radius:10px;border-left:4px solid ${col};">
+                        <div><strong>FTY</strong> vs <strong>${m.adversaire||'?'}</strong><div style="font-size:.8rem;color:var(--text-muted);margin-top:.25rem;">${m.competition||''} · ${m.date||''}</div></div>
+                        <div style="font-size:1.5rem;font-weight:900;font-family:var(--font-display);color:${col};">${m.score||'?'}</div>
+                    </div>`;
+                }).join('') + '</div>'}
             </div>
         </div>
-        
-        ${matches.length > 0 ? `
-        <div class="card">
-            <h3 style="margin-bottom:1.5rem;">📅 Derniers Résultats</h3>
-            ${matches.slice(0,10).map(m => `
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:1rem;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:.5rem;">
-                <div style="font-weight:700;">FTY vs ${m.adversaire}</div>
-                <div style="font-size:.85rem;color:var(--text-muted);">${m.date||''} • ${m.competition||''}</div>
-                <div style="font-size:1.25rem;font-weight:900;color:${m.score&&m.score.split('-')[0]>m.score.split('-')[1]?'#22c55e':m.score&&m.score.split('-')[0]===m.score.split('-')[1]?'#f59e0b':'#ef4444'};">${m.score||'À jouer'}</div>
-            </div>`).join('')}
-        </div>` : '<div class="card"><p style="text-align:center;color:var(--text-muted)">Aucun résultat pour le moment</p></div>'}
-    </div>
-    </section>
-    `, 'dark', db));
+    </section>`;
+    res.send(publicLayoutV3(ps, 'Palmarès', content));
 });
 
-// PAGE RECRUTEMENT
 app.get('/recrutement', (req, res) => {
     const db = readDB();
-    res.send(publicLayout('Recrutement', `
-    <section class="section" style="padding-top:7rem;">
-    <div class="container">
-        <div class="section-header">
-            <div class="display-1" style="font-size:clamp(2rem,6vw,4rem);">🎯 RECRUTEMENT</div>
-            <p class="section-subtitle">FTY Club Pro recrute ! Rejoins notre équipe de champions</p>
-        </div>
-        
-        <div class="grid-3" style="margin-bottom:3rem;">
-            <div class="card" style="text-align:center;">
-                <div style="font-size:3rem;margin-bottom:1rem;">⚽</div>
-                <h3 style="color:#9333ea;">Joueurs</h3>
-                <p style="color:var(--text-secondary);margin:.75rem 0;">Cherchons des joueurs motivés, réguliers, esprit d'équipe.</p>
-                <a href="/candidature" class="btn btn-primary" style="margin-top:.5rem;">Postuler</a>
-            </div>
-            <div class="card" style="text-align:center;">
-                <div style="font-size:3rem;margin-bottom:1rem;">🛡️</div>
-                <h3 style="color:#ec4899;">Modérateurs</h3>
-                <p style="color:var(--text-secondary);margin:.75rem 0;">Aide à gérer la communauté et le Discord officiel.</p>
-                <a href="/candidature" class="btn btn-primary" style="margin-top:.5rem;">Postuler</a>
-            </div>
-            <div class="card" style="text-align:center;">
-                <div style="font-size:3rem;margin-bottom:1rem;">🎧</div>
-                <h3 style="color:#f59e0b;">Support</h3>
-                <p style="color:var(--text-secondary);margin:.75rem 0;">Accompagne les nouveaux membres et réponds aux questions.</p>
-                <a href="/candidature" class="btn btn-primary" style="margin-top:.5rem;">Postuler</a>
-            </div>
-        </div>
-        
-        <div class="card" style="background:linear-gradient(135deg,rgba(147,51,234,.15),rgba(236,72,153,.1));border-color:#9333ea;text-align:center;">
-            <h3 style="font-size:1.75rem;margin-bottom:1rem;">📋 Critères de sélection</h3>
-            <div class="grid-2" style="text-align:left;gap:1rem;margin-top:1.5rem;">
-                <div>✅ Avoir plus de 13 ans</div>
-                <div>✅ Disponible régulièrement</div>
-                <div>✅ Esprit fair-play</div>
-                <div>✅ Microphone fonctionnel</div>
-                <div>✅ Compte Discord actif</div>
-                <div>✅ Passionné par le foot / gaming</div>
-            </div>
-        </div>
-    </div>
-    </section>
-    `, 'dark', db));
-});
-
-
-// ============================================================
-// ===              CHATBOT PUBLIC (IA)                    ===
-// ============================================================
-// API endpoint pour le chatbot
-app.post('/api/chatbot', async (req, res) => {
-    const { message } = req.body;
-    if (!message || message.trim().length === 0) return res.json({ reply: 'Dis-moi quelque chose 😊' });
-    const msg = message.toLowerCase().trim();
-    
-    // Réponses automatiques intelligentes
-    const responses = [
-        { keys: ['bonjour','salut','hello','coucou','yo','hey'], reply: '👋 Salut ! Je suis le bot FTY. Comment puis-je t\'aider ?' },
-        { keys: ['rejoindre','intégrer','postuler','candidature'], reply: '🎯 Pour rejoindre FTY Club Pro, rends-toi sur /candidature et remplis le formulaire ! Notre staff te répondra sous 48h.' },
-        { keys: ['discord'], reply: '💬 Rejoins notre Discord officiel via le lien sur la page d\'accueil !' },
-        { keys: ['tactique','formation','composition'], reply: '🎯 Notre tactique actuelle est disponible sur /tactique !' },
-        { keys: ['match','matchs','prochain match'], reply: '⚽ Consulte notre calendrier sur /matchs pour voir tous les matchs !' },
-        { keys: ['recrutement','recrute'], reply: '🎯 On recrute ! Consulte la page /recrutement pour les postes disponibles.' },
-        { keys: ['staff','owner','fondateur','admin'], reply: '👑 L\'équipe FTY est composée de Xywez (Fondateur) et Tom (Co-fondateur) !' },
-        { keys: ['guide','aide'], reply: '📖 Consulte notre guide complet sur /guide !' },
-        { keys: ['contact','signaler'], reply: '📧 Pour nous contacter, utilise le formulaire sur /contact !' },
-        { keys: ['palmares','resultats','victoires','stats'], reply: '🏆 Consulte notre palmarès sur /palmares !' },
-        { keys: ['panel','login','connexion'], reply: '🔐 Accède au panel sur /panel/login si tu as un compte !' },
-        { keys: ['merci','thanks','ty'], reply: '😊 Avec plaisir ! N\'hésite pas si tu as d\'autres questions.' },
-        { keys: ['au revoir','bye','cya'], reply: '👋 À bientôt sur FTY Club Pro !' },
-    ];
-    
-    let reply = '🤖 Désolé, je ne comprends pas. Essaie : "rejoindre", "tactique", "matchs", "guide"...';
-    for (const entry of responses) {
-        if (entry.keys.some(k => msg.includes(k))) {
-            reply = entry.reply;
-            break;
-        }
-    }
-    
-    // Small delay for realism
-    await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
-    res.json({ reply });
-});
-
-
-// ============================================================
-// ===     SYSTÈME PERMISSIONS OWNER (XYWEZ DÉCIDE)       ===
-// ============================================================
-app.get('/panel/owner/permissions', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez.'));
-    const db = readDB();
-    const owners = db.users.filter(u => u.role === 'owner' || u.accountType === 'owner');
-    
-    const permsList = [
-        { key: 'canSeeIPs', label: '🔍 Voir les IPs des membres' },
-        { key: 'canManageIPs', label: '🛡️ Bloquer/Débloquer des IPs' },
-        { key: 'canViewLogs', label: '📋 Voir tous les logs' },
-        { key: 'canManageMaintenance', label: '🔧 Gérer la maintenance' },
-        { key: 'canManageOwners', label: '👑 Gérer les autres owners' },
-        { key: 'canViewStats', label: '📊 Voir les statistiques détaillées' },
-        { key: 'canManagePublic', label: '🎨 Personnaliser le site public' },
-        { key: 'ipAccess', label: '👁️ Accès aux IPs (selon rang)' },
-    ];
-    
+    const ps = getPublicSettings(db);
     const content = `
-    <div class="page-header">
-        <div>
-            <div class="page-title">🔑 <span>Permissions Owners</span></div>
-            <div class="page-breadcrumb">Panel · Owner · Gestion des permissions</div>
-        </div>
-    </div>
-    ${req.query.success ? `<div class="alert alert-success">✅ ${decodeURIComponent(req.query.success)}</div>` : ''}
-    
-    <div class="card">
-        <p style="color:var(--text-secondary);margin-bottom:1.5rem;">Seul <strong style="color:#9333ea;">Xywez</strong> peut configurer les permissions de chaque Owner. Les fondateurs et co-fondateurs voient automatiquement les IPs des rangs inférieurs.</p>
-        
-        ${owners.filter(o => o.username !== 'xywez').length === 0 ? '<p style="color:var(--text-muted);text-align:center;padding:2rem;">Aucun autre Owner pour le moment.</p>' :
-        owners.filter(o => o.username !== 'xywez').map(owner => `
-        <div style="background:var(--bg-tertiary);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;border:1px solid var(--border);">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
-                <h3 style="color:#9333ea;">👑 ${owner.username}</h3>
-                <span style="font-size:.8rem;color:var(--text-muted);">${owner.discordId || 'Pas de Discord'}</span>
+    <section style="padding:6rem 0 4rem;">
+        <div class="container">
+            <h1 class="display-1" style="text-align:center;font-size:clamp(2rem,6vw,4rem);margin-bottom:1rem;">🎯 RECRUTEMENT</h1>
+            <p style="text-align:center;color:var(--text-muted);font-size:1.1rem;margin-bottom:3rem;">Rejoins l'équipe FTY Club Pro</p>
+            <div class="grid-3" style="gap:2rem;margin-bottom:3rem;">
+                ${[
+                    { icon:'⚽', title:'Joueurs', desc:'Cherchons des joueurs passionnés, réguliers et fair-play. Tous niveaux bienvenus.', color:'#9333ea' },
+                    { icon:'🛡️', title:'Modérateurs', desc:'Tu veux gérer la communauté Discord ? Postule pour rejoindre le staff de modération.', color:'#ec4899' },
+                    { icon:'🎧', title:'Support', desc:'Aide les membres, réponds aux questions, gère les candidatures.', color:'#f59e0b' }
+                ].map(p => `
+                <div class="card" style="text-align:center;border-color:${p.color}40;">
+                    <div style="font-size:3rem;margin-bottom:1rem;">${p.icon}</div>
+                    <h3 style="color:${p.color};margin-bottom:.75rem;">${p.title}</h3>
+                    <p style="color:var(--text-secondary);margin-bottom:1.5rem;">${p.desc}</p>
+                    <span style="background:rgba(16,185,129,.2);color:#10b981;border:1px solid #10b98140;border-radius:20px;padding:.3rem 1rem;font-size:.85rem;">🟢 Ouvert</span>
+                </div>`).join('')}
             </div>
-            <form action="/panel/owner/permissions/save" method="POST">
-                <input type="hidden" name="targetUsername" value="${owner.username}">
-                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.75rem;">
-                    ${permsList.map(p => `
-                    <label style="display:flex;align-items:center;gap:.75rem;cursor:pointer;padding:.5rem;border-radius:8px;background:var(--bg-card);">
-                        <input type="checkbox" name="${p.key}" ${(owner.permissions||{})[p.key] ? 'checked' : ''} style="width:18px;height:18px;accent-color:#9333ea;">
-                        <span style="font-size:.9rem;">${p.label}</span>
-                    </label>`).join('')}
+            <div style="text-align:center;">
+                <h2 style="margin-bottom:1rem;">Prêt(e) à nous rejoindre ?</h2>
+                <a href="/candidature" class="btn btn-primary" style="font-size:1.1rem;padding:1rem 3rem;">📋 Postuler maintenant</a>
+            </div>
+        </div>
+    </section>`;
+    res.send(publicLayoutV3(ps, 'Recrutement', content));
+});
+
+app.get('/tactique', (req, res) => {
+    const db = readDB();
+    const ps = getPublicSettings(db);
+    const tactic = (db.serverConfig && db.serverConfig.tactic) || { formation: '4-3-3', style: 'Équilibré', mentality: 'Normal' };
+    const content = `
+    <section style="padding:6rem 0 4rem;">
+        <div class="container">
+            <h1 class="display-1" style="text-align:center;font-size:clamp(2rem,6vw,4rem);margin-bottom:1rem;">⚽ TACTIQUE</h1>
+            <p style="text-align:center;color:var(--text-muted);font-size:1.1rem;margin-bottom:2rem;">Formation officielle mise à jour en temps réel</p>
+            <div class="grid-2" style="gap:2rem;">
+                <div class="card" style="text-align:center;">
+                    <div style="font-size:4rem;font-weight:900;color:var(--primary);font-family:var(--font-display);margin-bottom:.5rem;">${tactic.formation||'N/A'}</div>
+                    <div style="color:var(--text-muted);margin-bottom:1.5rem;">Formation</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:.75rem;justify-content:center;">
+                        ${[['🎯',tactic.style||'N/A','Style'],['🧠',tactic.mentality||'N/A','Mentalité']].map(([i,v,l]) =>
+                            `<div style="background:rgba(147,51,234,.15);border:1px solid rgba(147,51,234,.3);border-radius:12px;padding:.75rem 1.25rem;text-align:center;"><div style="font-size:1.5rem;">${i}</div><div style="font-weight:700;color:var(--primary);">${v}</div><div style="font-size:.75rem;color:var(--text-muted);">${l}</div></div>`
+                        ).join('')}
+                    </div>
+                    ${tactic.updatedAt ? `<p style="color:var(--text-muted);font-size:.8rem;margin-top:1rem;">Mis à jour le ${new Date(tactic.updatedAt).toLocaleString('fr-FR')}</p>` : ''}
                 </div>
-                <button type="submit" class="btn btn-primary" style="margin-top:1rem;">💾 Sauvegarder permissions</button>
-            </form>
-        </div>`).join('')}
-    </div>
-    `;
-    res.send(panelLayout(user, 'Permissions Owners', content, 'owner'));
+                <div class="card">
+                    <h3 style="margin-bottom:1rem;">📋 Instructions</h3>
+                    ${(tactic.instructions||['Pressing haut','Transitions rapides','Construction courte']).map(i =>
+                        `<div style="padding:.75rem;background:var(--bg-tertiary);border-radius:8px;margin-bottom:.5rem;color:var(--text-secondary);">✓ ${i}</div>`
+                    ).join('')}
+                </div>
+            </div>
+        </div>
+    </section>`;
+    res.send(publicLayoutV3(ps, 'Tactique', content));
 });
 
-app.post('/panel/owner/permissions/save', isAuthenticated, hasRole('owner'), (req, res) => {
-    const user = req.session.user;
-    if (user.username !== 'xywez') return res.status(403).send(errorPage('Accès Refusé', 'Réservé à Xywez.'));
-    const { targetUsername, ...perms } = req.body;
+// ── publicLayoutV3 — layout public avec chatbot intégré ──
+function publicLayoutV3(ps, title, content) {
+    const primary = ps.primaryColor || '#9333ea';
+    const accent = ps.accentColor || '#ec4899';
+    return `<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>\${title} - FTY Club Pro</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;700;900&family=Titillium+Web:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{--primary:\${primary};--accent:\${accent};--font-display:'Exo 2',sans-serif;--font-body:'Titillium Web',sans-serif;}
+[data-theme=dark]{--bg:#000;--bg2:#0f0318;--bg3:#1a0b2e;--text:#fff;--text2:rgba(255,255,255,.8);--muted:rgba(255,255,255,.5);--border:rgba(147,51,234,.3)}
+body{font-family:var(--font-body);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;line-height:1.6}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 50%,rgba(147,51,234,.15),transparent 60%),radial-gradient(ellipse at 80% 30%,rgba(236,72,153,.1),transparent 60%);pointer-events:none;z-index:0}
+.container{max-width:1200px;margin:0 auto;padding:0 1.5rem}
+@media(max-width:768px){.container{padding:0 1rem}}
+/* NAV */
+nav{position:sticky;top:0;z-index:100;background:rgba(0,0,0,.85);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);}
+.nav-inner{display:flex;align-items:center;justify-content:space-between;padding:.875rem 1.5rem;max-width:1200px;margin:0 auto;}
+.nav-logo{font-family:var(--font-display);font-size:1.35rem;font-weight:900;background:linear-gradient(135deg,var(--primary),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;text-decoration:none;}
+.nav-links{display:flex;gap:1.5rem;list-style:none;align-items:center;}
+.nav-links a{color:rgba(255,255,255,.7);text-decoration:none;font-size:.9rem;font-weight:600;transition:color .2s;white-space:nowrap;}
+.nav-links a:hover{color:#fff}
+.nav-toggle{display:none;background:none;border:1px solid var(--border);border-radius:8px;width:40px;height:40px;cursor:pointer;font-size:1.25rem;color:#fff;align-items:center;justify-content:center;}
+@media(max-width:768px){
+.nav-toggle{display:flex}
+.nav-links{display:none;position:absolute;top:100%;left:0;right:0;background:rgba(0,0,0,.97);border-bottom:1px solid var(--border);flex-direction:column;padding:1rem;gap:0;}
+.nav-links.open{display:flex}
+.nav-links a{padding:.875rem 1rem;border-radius:8px;font-size:1rem;display:block;}
+.nav-links a:hover{background:rgba(147,51,234,.15)}
+}
+/* GRID */
+.grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:2rem}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:2rem}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:2rem}
+@media(max-width:1024px){.grid-3,.grid-4{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:640px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}}
+/* CARD */
+.card{background:rgba(147,51,234,.08);border:1px solid var(--border);border-radius:16px;padding:1.75rem;transition:transform .2s,box-shadow .2s;position:relative;overflow:hidden;}
+.card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(147,51,234,.25);}
+/* BTN */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;padding:.875rem 2rem;font-family:var(--font-display);font-weight:700;border:none;border-radius:10px;cursor:pointer;text-decoration:none;transition:all .2s;font-size:.95rem;}
+.btn-primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;box-shadow:0 4px 20px rgba(147,51,234,.4);}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(147,51,234,.6);}
+/* DISPLAY */
+.display-1{font-family:var(--font-display);font-weight:900;background:linear-gradient(135deg,var(--primary),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+/* FORMS */
+.form-group{margin-bottom:1.25rem}
+.form-label{display:block;margin-bottom:.5rem;font-weight:600;font-size:.9rem;color:rgba(255,255,255,.8)}
+.form-control{width:100%;background:rgba(147,51,234,.1);border:1px solid rgba(147,51,234,.4);border-radius:8px;padding:.75rem 1rem;color:#fff;font-size:.95rem;font-family:inherit;outline:none;transition:border-color .2s}
+.form-control:focus{border-color:var(--primary)}
+/* ANNOUNCEMENT BANNER */
+.ann-banner{background:linear-gradient(135deg,var(--primary),var(--accent));padding:.75rem 1rem;text-align:center;font-weight:700;font-size:.9rem;position:relative;z-index:101;}
+/* FOOTER */
+footer{background:rgba(0,0,0,.8);border-top:1px solid var(--border);padding:3rem 1.5rem;text-align:center;margin-top:6rem;color:rgba(255,255,255,.5);font-size:.875rem;}
+/* CHATBOT */
+#fty-chat-btn{position:fixed;bottom:24px;right:24px;z-index:10000;width:58px;height:58px;border-radius:50%;background:linear-gradient(135deg,var(--primary),var(--accent));border:none;cursor:pointer;font-size:1.5rem;box-shadow:0 6px 24px rgba(147,51,234,.6);transition:transform .2s;display:flex;align-items:center;justify-content:center;}
+#fty-chat-btn:hover{transform:scale(1.1)}
+#fty-chat-win{position:fixed;bottom:94px;right:24px;z-index:10000;width:320px;height:420px;background:#0a0014;border:2px solid var(--primary);border-radius:16px;overflow:hidden;display:none;flex-direction:column;box-shadow:0 20px 60px rgba(147,51,234,.5);}
+#fty-chat-win.open{display:flex;animation:chatIn .2s ease}
+@keyframes chatIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:400px){#fty-chat-win{width:calc(100vw - 16px);right:8px}}
+#fty-msgs{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.6rem;scrollbar-width:thin;scrollbar-color:var(--primary) #0a0014}
+.msg-bot{background:rgba(147,51,234,.2);border-radius:8px 8px 8px 0;padding:.65rem .875rem;color:#fff;font-size:.875rem;max-width:88%;border:1px solid rgba(147,51,234,.3);}
+.msg-user{background:linear-gradient(135deg,rgba(147,51,234,.5),rgba(236,72,153,.4));border-radius:8px 8px 0 8px;padding:.65rem .875rem;color:#fff;font-size:.875rem;max-width:88%;align-self:flex-end;}
+/* MOBILE UTIL */
+@media(max-width:768px){
+.btn{padding:.75rem 1.25rem;font-size:.875rem}
+.card{padding:1.25rem;border-radius:12px}
+}
+</style>
+</head>
+<body>
+\${ps.announcementActive && ps.announcementBanner ? \`<div class="ann-banner">📢 \${ps.announcementBanner}</div>\` : ''}
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="nav-logo">⚽ FTY CLUB</a>
+    <button class="nav-toggle" onclick="document.getElementById('navlinks').classList.toggle('open')">☰</button>
+    <ul class="nav-links" id="navlinks">
+      <li><a href="/">🏠 Accueil</a></li>
+      <li><a href="/tactique">⚽ Tactique</a></li>
+      <li><a href="/palmares">🏆 Palmarès</a></li>
+      <li><a href="/recrutement">🎯 Recrutement</a></li>
+      <li><a href="/guide">📖 Guide</a></li>
+      <li><a href="/candidature">📋 Candidature</a></li>
+      <li><a href="/panel/login" style="background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff!important;padding:.45rem 1rem;border-radius:8px;">🔑 Panel</a></li>
+    </ul>
+  </div>
+</nav>
+<div style="position:relative;z-index:1;">
+\${content}
+</div>
+<footer>
+  <p style="margin-bottom:.5rem;font-family:'Exo 2',sans-serif;font-size:1rem;font-weight:700;background:linear-gradient(135deg,var(--primary),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">⚽ FTY CLUB PRO</p>
+  <p>\${ps.customFooter || '© 2026 FTY Club Pro'}</p>
+</footer>
+\${ps.chatbotEnabled !== false ? \`
+<button id="fty-chat-btn" onclick="ftyToggle()" title="FTY Bot">🤖</button>
+<div id="fty-chat-win">
+  <div style="background:linear-gradient(135deg,var(--primary),var(--accent));padding:.875rem 1rem;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+    <div style="display:flex;align-items:center;gap:.5rem;color:#fff;font-weight:700;font-size:.9rem;"><span>🤖</span><span>FTY Bot</span><span style="width:7px;height:7px;background:#22c55e;border-radius:50%;"></span></div>
+    <button onclick="ftyToggle()" style="background:rgba(0,0,0,.25);border:none;color:#fff;width:28px;height:28px;border-radius:6px;cursor:pointer;font-size:1.1rem;display:flex;align-items:center;justify-content:center;">×</button>
+  </div>
+  <div id="fty-msgs"><div class="msg-bot">👋 Salut ! Je suis le bot FTY. Demande-moi : rejoindre, tactique, matchs, recrutement...</div></div>
+  <div style="padding:.75rem;border-top:1px solid rgba(147,51,234,.4);display:flex;gap:.5rem;flex-shrink:0;background:#0f0318;">
+    <input id="fty-inp" type="text" placeholder="Écris ton message..." autocomplete="off"
+      style="flex:1;background:rgba(147,51,234,.15);border:1px solid rgba(147,51,234,.4);border-radius:8px;padding:.5rem .75rem;color:#fff;font-size:.875rem;outline:none;"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();ftySend();}">
+    <button onclick="ftySend()" style="background:linear-gradient(135deg,var(--primary),var(--accent));border:none;border-radius:8px;padding:.5rem .875rem;color:#fff;cursor:pointer;font-size:1rem;">➤</button>
+  </div>
+</div>
+<script>
+function ftyToggle(){document.getElementById('fty-chat-win').classList.toggle('open');if(document.getElementById('fty-chat-win').classList.contains('open'))setTimeout(()=>document.getElementById('fty-inp').focus(),50);}
+function ftyAddMsg(txt,type){var m=document.getElementById('fty-msgs');var d=document.createElement('div');d.className=type==='user'?'msg-user':'msg-bot';d.innerHTML=txt;m.appendChild(d);m.scrollTop=m.scrollHeight;return d;}
+async function ftySend(){var inp=document.getElementById('fty-inp');var msg=inp.value.trim();if(!msg)return;inp.value='';ftyAddMsg(msg,'user');var t=ftyAddMsg('✏️ En train d\\'écrire...','bot');t.style.opacity='.5';try{var r=await fetch('/api/chatbot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});var d=await r.json();t.remove();ftyAddMsg(d.reply||'🤖','bot');}catch(e){t.remove();ftyAddMsg('❌ Erreur connexion','bot');}}
+<\/script>\` : ''}
+</body></html>`;
+}
+
+// ── API pour les routes V3 ────────────────────────────────
+app.get('/api/geo/:ip', async (req, res) => {
+    try {
+        const geo = await getGeoIP(req.params.ip);
+        res.json(geo);
+    } catch(e) { res.json({ error: e.message }); }
+});
+
+app.post('/api/maintenance', (req, res) => {
+    const key = req.headers['x-api-key'];
+    if (key !== PANEL_API_KEY) return res.status(401).json({ error: 'Unauthorized' });
     const db = readDB();
-    const target = db.users.find(u => u.username === targetUsername);
-    if (!target) return res.redirect('/panel/owner/permissions?error=' + encodeURIComponent('Utilisateur introuvable'));
-    
-    const permKeys = ['canSeeIPs','canManageIPs','canViewLogs','canManageMaintenance','canManageOwners','canViewStats','canManagePublic','ipAccess'];
-    if (!target.permissions) target.permissions = {};
-    permKeys.forEach(k => { target.permissions[k] = !!perms[k]; });
-    // Sync ipAccess to root level for canSeeIP function
-    target.ipAccess = !!perms.ipAccess;
+    if (!db.publicSettings) db.publicSettings = {};
+    db.publicSettings.maintenanceMode = !!req.body.enabled;
+    if (req.body.message) db.publicSettings.maintenanceMessage = req.body.message;
     writeDB(db);
-    addLog('🔑 Permissions modifiées', user.username, targetUsername, {}, getClientIP(req), getClientInfo(req));
-    res.redirect('/panel/owner/permissions?success=' + encodeURIComponent(`Permissions de ${targetUsername} mises à jour`));
+    res.json({ success: true, maintenanceMode: db.publicSettings.maintenanceMode });
 });
-
-
-// ============================================================
-// ===     LOGS ENRICHIS AVEC GÉO-IP                       ===
-// ============================================================
-app.get('/panel/logs-geo', isAuthenticated, hasRole('manager'), async (req, res) => {
-    const user = req.session.user;
-    const db = readDB();
-    const logs = (db.logs||[]).slice(0, 100);
-    const isXywez = user.username === 'xywez';
-    const vRole = user.role || user.accountType || 'joueur';
-    
-    // Enrich logs with geo - only for authorized users
-    const enrichedLogs = await Promise.all(logs.map(async log => {
-        const tRole = log.targetRole || 'joueur';
-        const showIP = isXywez || canSeeIP(user, tRole);
-        let geo = null;
-        if (showIP && log.ip && log.ip !== 'unknown') {
-            geo = await getGeoIP(log.ip);
-        }
-        return {
-            ...log,
-            displayIP: showIP ? (log.ip || 'N/A') : maskIP(log.ip),
-            geo: showIP ? geo : null,
-            ipVisible: showIP
-        };
-    }));
-    
-    const content = `
-    <div class="page-header">
-        <div>
-            <div class="page-title">📋 <span>Logs Géo-IP</span></div>
-            <div class="page-breadcrumb">Panel · Logs enrichis avec géolocalisation</div>
-        </div>
-        <div style="font-size:.8rem;color:var(--text-muted);">${isXywez ? '👑 Accès complet (Xywez)' : `Accès selon rang (${vRole})`}</div>
-    </div>
-    <div class="card">
-        <div style="overflow-x:auto;">
-        <table class="table">
-        <thead><tr><th>Date</th><th>Action</th><th>Par</th><th>Cible</th><th>IP</th><th>Géolocalisation</th><th>Device</th></tr></thead>
-        <tbody>
-        ${enrichedLogs.length === 0 ? '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);">Aucun log</td></tr>' :
-        enrichedLogs.map(log => `
-        <tr>
-            <td style="font-size:.8rem;white-space:nowrap;color:var(--text-muted);">${new Date(log.timestamp).toLocaleString('fr-FR')}</td>
-            <td><span style="font-weight:700;">${log.action||''}</span></td>
-            <td style="color:#9333ea;font-weight:600;">${log.executor||''}</td>
-            <td>${log.target||'-'}</td>
-            <td><code style="font-size:.8rem;color:${log.ipVisible?'#9333ea':'#666'};">${log.displayIP||'N/A'}</code>
-                ${!log.ipVisible ? '<span style="font-size:.65rem;color:var(--text-muted);display:block;">masquée</span>' : ''}
-            </td>
-            <td>${log.geo ? `<span title="${log.geo.isp}">${log.geo.emoji} ${log.geo.city}, ${log.geo.country}${log.geo.proxy?'<span style="color:#f59e0b;margin-left:.25rem;" title="Proxy/VPN">⚠️</span>':''}</span>` : '<span style="color:var(--text-muted)">-</span>'}</td>
-            <td style="font-size:.8rem;">${log.device||''} ${log.browser||''}</td>
-        </tr>`).join('')}
-        </tbody>
-        </table>
-        </div>
-    </div>
-    `;
-    res.send(panelLayout(user, 'Logs Géo-IP', content, 'logs'));
-});
-
 
 app.listen(PORT, () => {
-    console.log(`
-╔══════════════════════════════════════════════════════════╗
-║                                                          ║
-║   ⚽  FTY CLUB PRO - SYSTÈME COMPLET V2.0  ⚽           ║
-║                                                          ║
-║   🌐  Site Public:    http://localhost:${PORT}              ║
-║   🎛️   Panel Admin:   http://localhost:${PORT}/panel         ║
-║   🔑  Login:          /panel/login                       ║
-║   🔗  Discord OAuth:  /auth/discord                      ║
-║                                                          ║
-║   👑  Owner: xywez / Yaakoub.80                          ║
-║   🎮  Fondateurs: Xywez (Nytrox692) & Tom (Coketupue)    ║
-║   🌍  GéoIP • Maintenance • IPMgr • Chatbot • Guide      ║
-║                                                          ║
-║   ✨  Features:                                          ║
-║   • OAuth Discord                                        ║
-║   • Thèmes Sombre/Clair                                  ║
-║   • Stade 3D (Three.js)                                  ║
-║   • Histoire du Club                                     ║
-║   • Panel Owner complet                                  ║
-║   • Bot Discord intégré                                  ║
-║                                                          ║
-╚══════════════════════════════════════════════════════════╝
-    `);
+    console.log('[FTY CLUB PRO V3] Serveur demarre sur port ' + PORT);
+    console.log('  Panel: /panel/login | Maintenance: /panel/owner/maintenance');
 });
