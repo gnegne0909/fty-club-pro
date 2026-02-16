@@ -1,18 +1,30 @@
 {
-    "name": "fty-panel-web",
-    "version": "2.0.0",
-    "description": "Panel Web FTY Club Pro - Optimisé Mobile",
-    "main": "panel-web.js",
-    "scripts": {
-        "start": "node panel-web.js"
-    },
-    "engines": {
-        "node": ">=18.0.0"
-    },
-    "dependencies": {
-        "express": "^4.18.2",
-        "express-session": "^1.17.3",
-        "body-parser": "^1.20.2",
-        "axios": "^1.6.0"
-    }
+  "name": "fty-club-pro",
+  "version": "2.0.0",
+  "description": "Système de gestion FTY Club Pro avec Discord OAuth - Panel Web Optimisé Mobile",
+  "main": "fty-club-pro.js",
+  "scripts": {
+    "start": "node fty-club-pro.js",
+    "dev": "nodemon fty-club-pro.js",
+    "panel": "node panel-web.js"
+  },
+  "keywords": [
+    "fty-club",
+    "discord",
+    "management"
+  ],
+  "author": "xywez",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "body-parser": "^1.20.2",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
