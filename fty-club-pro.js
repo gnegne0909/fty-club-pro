@@ -7542,23 +7542,24 @@ app.get('/tactique', (req, res) => {
 function publicLayoutV3(ps, title, content) {
     const primary = ps.primaryColor || '#9333ea';
     const accent = ps.accentColor || '#ec4899';
+    const theme = ps.theme || 'dark';
+    
     return `<!DOCTYPE html>
-<html lang="fr" data-theme="dark">
+<html lang="fr" data-theme="${theme}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>\${title} - FTY Club Pro</title>
+<title>${ps.teamName || 'FTY Club'}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;700;900&family=Titillium+Web:wght@400;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@700;900&family=Titillium+Web:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-:root{--primary:\${primary};--accent:\${accent};--font-display:'Exo 2',sans-serif;--font-body:'Titillium Web',sans-serif;}
+:root{--primary:${primary};--accent:${accent};--font-display:'Exo 2',sans-serif;--font-body:'Titillium Web',sans-serif;}
 [data-theme=dark]{--bg:#000;--bg2:#0f0318;--bg3:#1a0b2e;--text:#fff;--text2:rgba(255,255,255,.8);--muted:rgba(255,255,255,.5);--border:rgba(147,51,234,.3)}
 body{font-family:var(--font-body);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;line-height:1.6}
 body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 50%,rgba(147,51,234,.15),transparent 60%),radial-gradient(ellipse at 80% 30%,rgba(236,72,153,.1),transparent 60%);pointer-events:none;z-index:0}
 .container{max-width:1200px;margin:0 auto;padding:0 1.5rem}
 @media(max-width:768px){.container{padding:0 1rem}}
-/* NAV */
 nav{position:sticky;top:0;z-index:100;background:rgba(0,0,0,.85);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);}
 .nav-inner{display:flex;align-items:center;justify-content:space-between;padding:.875rem 1.5rem;max-width:1200px;margin:0 auto;}
 .nav-logo{font-family:var(--font-display);font-size:1.35rem;font-weight:900;background:linear-gradient(135deg,var(--primary),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;text-decoration:none;}
@@ -7568,54 +7569,50 @@ nav{position:sticky;top:0;z-index:100;background:rgba(0,0,0,.85);backdrop-filter
 .nav-toggle{display:none;background:none;border:1px solid var(--border);border-radius:8px;width:40px;height:40px;cursor:pointer;font-size:1.25rem;color:#fff;align-items:center;justify-content:center;}
 @media(max-width:768px){
 .nav-toggle{display:flex}
-.nav-links{display:none;position:absolute;top:100%;left:0;right:0;background:rgba(0,0,0,.97);border-bottom:1px solid var(--border);flex-direction:column;padding:1rem;gap:0;}
+.nav-links{display:none;position:fixed;top:60px;left:0;right:0;background:rgba(0,0,0,.97);border-bottom:1px solid var(--border);flex-direction:column;padding:1rem;gap:0;z-index:99;}
 .nav-links.open{display:flex}
 .nav-links a{padding:.875rem 1rem;border-radius:8px;font-size:1rem;display:block;}
 .nav-links a:hover{background:rgba(147,51,234,.15)}
 }
-/* GRID */
 .grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:2rem}
 .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:2rem}
 .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:2rem}
 @media(max-width:1024px){.grid-3,.grid-4{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:640px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}}
-/* CARD */
+@media(max-width:640px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr;gap:1rem}}
 .card{background:rgba(147,51,234,.08);border:1px solid var(--border);border-radius:16px;padding:1.75rem;transition:transform .2s,box-shadow .2s;position:relative;overflow:hidden;}
 .card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(147,51,234,.25);}
-/* BTN */
+@media(max-width:640px){.card{padding:1.25rem;border-radius:12px}}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;padding:.875rem 2rem;font-family:var(--font-display);font-weight:700;border:none;border-radius:10px;cursor:pointer;text-decoration:none;transition:all .2s;font-size:.95rem;}
 .btn-primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;box-shadow:0 4px 20px rgba(147,51,234,.4);}
 .btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(147,51,234,.6);}
-/* DISPLAY */
+@media(max-width:640px){.btn{padding:.75rem 1.25rem;font-size:.875rem}}
 .display-1{font-family:var(--font-display);font-weight:900;background:linear-gradient(135deg,var(--primary),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
-/* FORMS */
 .form-group{margin-bottom:1.25rem}
 .form-label{display:block;margin-bottom:.5rem;font-weight:600;font-size:.9rem;color:rgba(255,255,255,.8)}
 .form-control{width:100%;background:rgba(147,51,234,.1);border:1px solid rgba(147,51,234,.4);border-radius:8px;padding:.75rem 1rem;color:#fff;font-size:.95rem;font-family:inherit;outline:none;transition:border-color .2s}
 .form-control:focus{border-color:var(--primary)}
-/* ANNOUNCEMENT BANNER */
 .ann-banner{background:linear-gradient(135deg,var(--primary),var(--accent));padding:.75rem 1rem;text-align:center;font-weight:700;font-size:.9rem;position:relative;z-index:101;}
-/* FOOTER */
 footer{background:rgba(0,0,0,.8);border-top:1px solid var(--border);padding:3rem 1.5rem;text-align:center;margin-top:6rem;color:rgba(255,255,255,.5);font-size:.875rem;}
-/* CHATBOT */
 #fty-chat-btn{position:fixed;bottom:24px;right:24px;z-index:10000;width:58px;height:58px;border-radius:50%;background:linear-gradient(135deg,var(--primary),var(--accent));border:none;cursor:pointer;font-size:1.5rem;box-shadow:0 6px 24px rgba(147,51,234,.6);transition:transform .2s;display:flex;align-items:center;justify-content:center;}
 #fty-chat-btn:hover{transform:scale(1.1)}
 #fty-chat-win{position:fixed;bottom:94px;right:24px;z-index:10000;width:320px;height:420px;background:#0a0014;border:2px solid var(--primary);border-radius:16px;overflow:hidden;display:none;flex-direction:column;box-shadow:0 20px 60px rgba(147,51,234,.5);}
 #fty-chat-win.open{display:flex;animation:chatIn .2s ease}
 @keyframes chatIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
-@media(max-width:400px){#fty-chat-win{width:calc(100vw - 16px);right:8px}}
+@media(max-width:400px){
+#fty-chat-win{width:calc(100vw - 16px);height:calc(100vh - 100px);right:8px;bottom:80px}
+#fty-chat-btn{bottom:16px;right:16px;width:52px;height:52px}
+}
 #fty-msgs{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.6rem;scrollbar-width:thin;scrollbar-color:var(--primary) #0a0014}
 .msg-bot{background:rgba(147,51,234,.2);border-radius:8px 8px 8px 0;padding:.65rem .875rem;color:#fff;font-size:.875rem;max-width:88%;border:1px solid rgba(147,51,234,.3);}
 .msg-user{background:linear-gradient(135deg,rgba(147,51,234,.5),rgba(236,72,153,.4));border-radius:8px 8px 0 8px;padding:.65rem .875rem;color:#fff;font-size:.875rem;max-width:88%;align-self:flex-end;}
-/* MOBILE UTIL */
 @media(max-width:768px){
-.btn{padding:.75rem 1.25rem;font-size:.875rem}
-.card{padding:1.25rem;border-radius:12px}
+table{font-size:.8rem;display:block;overflow-x:auto}
+td,th{padding:.5rem!important}
 }
 </style>
 </head>
 <body>
-\${ps.announcementActive && ps.announcementBanner ? \`<div class="ann-banner">📢 \${ps.announcementBanner}</div>\` : ''}
+${ps.announcementActive && ps.announcementBanner ? `<div class="ann-banner">📢 ${ps.announcementBanner}</div>` : ''}
 <nav>
   <div class="nav-inner">
     <a href="/" class="nav-logo">⚽ FTY CLUB</a>
@@ -7632,13 +7629,13 @@ footer{background:rgba(0,0,0,.8);border-top:1px solid var(--border);padding:3rem
   </div>
 </nav>
 <div style="position:relative;z-index:1;">
-\${content}
+${content}
 </div>
 <footer>
   <p style="margin-bottom:.5rem;font-family:'Exo 2',sans-serif;font-size:1rem;font-weight:700;background:linear-gradient(135deg,var(--primary),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">⚽ FTY CLUB PRO</p>
-  <p>\${ps.customFooter || '© 2026 FTY Club Pro'}</p>
+  <p>${ps.customFooter || '© 2026 FTY Club Pro'}</p>
 </footer>
-\${ps.chatbotEnabled !== false ? \`
+${ps.chatbotEnabled !== false ? `
 <button id="fty-chat-btn" onclick="ftyToggle()" title="FTY Bot">🤖</button>
 <div id="fty-chat-win">
   <div style="background:linear-gradient(135deg,var(--primary),var(--accent));padding:.875rem 1rem;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
@@ -7654,12 +7651,14 @@ footer{background:rgba(0,0,0,.8);border-top:1px solid var(--border);padding:3rem
   </div>
 </div>
 <script>
-function ftyToggle(){document.getElementById('fty-chat-win').classList.toggle('open');if(document.getElementById('fty-chat-win').classList.contains('open'))setTimeout(()=>document.getElementById('fty-inp').focus(),50);}
+function ftyToggle(){var w=document.getElementById('fty-chat-win');w.classList.toggle('open');if(w.classList.contains('open'))setTimeout(function(){document.getElementById('fty-inp').focus()},50);}
 function ftyAddMsg(txt,type){var m=document.getElementById('fty-msgs');var d=document.createElement('div');d.className=type==='user'?'msg-user':'msg-bot';d.innerHTML=txt;m.appendChild(d);m.scrollTop=m.scrollHeight;return d;}
 async function ftySend(){var inp=document.getElementById('fty-inp');var msg=inp.value.trim();if(!msg)return;inp.value='';ftyAddMsg(msg,'user');var t=ftyAddMsg('✏️ En train d\\'écrire...','bot');t.style.opacity='.5';try{var r=await fetch('/api/chatbot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});var d=await r.json();t.remove();ftyAddMsg(d.reply||'🤖','bot');}catch(e){t.remove();ftyAddMsg('❌ Erreur connexion','bot');}}
-<\/script>\` : ''}
+</scr${''}ipt>` : ''}
 </body></html>`;
 }
+
+
 
 // ── API pour les routes V3 ────────────────────────────────
 app.get('/api/geo/:ip', async (req, res) => {
