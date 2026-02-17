@@ -8006,4 +8006,3 @@ app.listen(PORT, () => {
     console.log('[FTY CLUB PRO V3] Serveur demarre sur port ' + PORT);
     console.log('  Panel: /panel/login | Maintenance: /panel/owner/maintenance');
 });
-
